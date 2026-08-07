@@ -292,11 +292,37 @@ def render_job_card(j, sub_label=""):
 
 
 def sync_month_from_date(ds):
-    """Seçili tarihe göre ay/yıl seçicilerini güncelle."""
+    """Seçili tarihe göre ay/yıl seçicilerini güncelle (widget'lardan önce çağrılmalı)."""
     parca = ds.split(".")
     if len(parca) == 3:
         st.session_state.basit_sm = int(parca[1])
         st.session_state.basit_sy = int(parca[2])
+
+
+def apply_pending_month_updates(now):
+    """Selectbox render edilmeden önce bekleyen ay/tarih güncellemelerini uygula."""
+    if "basit_sm" not in st.session_state:
+        st.session_state.basit_sm = now.month
+    if "basit_sy" not in st.session_state:
+        st.session_state.basit_sy = now.year
+
+    nav = st.session_state.pop("_month_nav", None)
+    if nav == "prev":
+        sm_v, sy_v = st.session_state.basit_sm, st.session_state.basit_sy
+        st.session_state.basit_sm = 12 if sm_v == 1 else sm_v - 1
+        if sm_v == 1:
+            st.session_state.basit_sy = sy_v - 1
+    elif nav == "next":
+        sm_v, sy_v = st.session_state.basit_sm, st.session_state.basit_sy
+        st.session_state.basit_sm = 1 if sm_v == 12 else sm_v + 1
+        if sm_v == 12:
+            st.session_state.basit_sy = sy_v + 1
+    elif nav == "today":
+        st.session_state.sel_date = format_tr_date(date.today())
+        sync_month_from_date(st.session_state.sel_date)
+
+    if st.session_state.pop("_sync_month_from_date", False):
+        sync_month_from_date(st.session_state.sel_date)
 
 
 db = st.session_state.db_data
@@ -305,6 +331,8 @@ personnel = db.get("service_personnel", [])
 expenses_list = db.get("expenses", [])
 now = datetime.now()
 q_len = len(st.session_state.pending_actions)
+
+apply_pending_month_updates(now)
 
 # --- ÜST BAR ---
 st.markdown('<div class="mobil-bar">', unsafe_allow_html=True)
@@ -327,7 +355,7 @@ ay_row1, ay_row2, ay_row3 = st.columns([1, 1, 1])
 with ay_row1:
     sy = st.selectbox("Yıl", [now.year, now.year + 1], key="basit_sy", label_visibility="collapsed")
 with ay_row2:
-    sm = st.selectbox("Ay", range(1, 13), index=now.month - 1, key="basit_sm", format_func=lambda x: calendar.month_name[x])
+    sm = st.selectbox("Ay", range(1, 13), key="basit_sm", format_func=lambda x: calendar.month_name[x])
 with ay_row3:
     st.caption(f"{len(jobs_list)} iş\n{len(personnel)} personel")
 
@@ -514,7 +542,7 @@ with tab_takvim:
             d = datetime.strptime(sd, "%d.%m.%Y").date() - timedelta(days=1)
             if d >= min_d:
                 st.session_state.sel_date = d.strftime("%d.%m.%Y")
-                sync_month_from_date(st.session_state.sel_date)
+                st.session_state._sync_month_from_date = True
             st.rerun()
     with nav2:
         gun = st.date_input(
@@ -527,13 +555,13 @@ with tab_takvim:
         yeni = gun.strftime("%d.%m.%Y")
         if yeni != sd:
             st.session_state.sel_date = yeni
-            sync_month_from_date(yeni)
+            st.session_state._sync_month_from_date = True
             st.rerun()
     with nav3:
         if st.button("Yarın ▶", key="basit_yarin", use_container_width=True):
             d = datetime.strptime(sd, "%d.%m.%Y").date() + timedelta(days=1)
             st.session_state.sel_date = d.strftime("%d.%m.%Y")
-            sync_month_from_date(st.session_state.sel_date)
+            st.session_state._sync_month_from_date = True
             st.rerun()
 
     st.markdown(f'<div class="day-header">📅 {sd}</div>', unsafe_allow_html=True)
@@ -585,18 +613,13 @@ with tab_takvim:
     with st.expander("📅 Ay takvimi", expanded=False):
         nav_a, nav_b, nav_c = st.columns(3)
         if nav_a.button("◀ Önceki ay", key="basit_prev_m", use_container_width=True):
-            st.session_state.basit_sm = 12 if sm == 1 else sm - 1
-            if sm == 1:
-                st.session_state.basit_sy = sy - 1
+            st.session_state._month_nav = "prev"
             st.rerun()
         if nav_b.button("📍 Bugün", key="basit_bugun", use_container_width=True):
-            st.session_state.sel_date = bugun
-            sync_month_from_date(bugun)
+            st.session_state._month_nav = "today"
             st.rerun()
         if nav_c.button("Sonraki ay ▶", key="basit_next_m", use_container_width=True):
-            st.session_state.basit_sm = 1 if sm == 12 else sm + 1
-            if sm == 12:
-                st.session_state.basit_sy = sy + 1
+            st.session_state._month_nav = "next"
             st.rerun()
 
         st.markdown(f"**{calendar.month_name[sm]} {sy}**")
