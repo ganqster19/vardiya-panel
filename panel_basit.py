@@ -291,6 +291,92 @@ def render_job_card(j, sub_label=""):
     )
 
 
+def render_job_edit_form(j, i, customers):
+    """Mobilde iş eklerken girilen tüm alanları düzenleme formu."""
+    jid = j.get("id", i)
+    if not customers:
+        st.caption("Müşteri listesi boş — önce 👤 Müşteri sekmesinden ekleyin.")
+        return
+    c_map = {c["name"]: c["id"] for c in customers}
+    names = list(c_map.keys())
+    cur_name = j.get("name") or ""
+    cust_idx = names.index(cur_name) if cur_name in names else 0
+
+    tip_labels = {"pro": "Profesyonel", "student": "Öğrenci"}
+    tip_rev = {v: k for k, v in tip_labels.items()}
+    cur_jtype = j.get("job_type") or "pro"
+    cur_tip = tip_labels.get(cur_jtype, "Profesyonel")
+
+    with st.expander("✏️ İşi düzenle"):
+        st.caption("Telefon ve konum müşteri profilinden gelir → **👤 Müşteri** sekmesi.")
+
+        em = st.selectbox("Müşteri", names, index=cust_idx, key=f"ed_cust_{jid}_{i}")
+        ed = st.date_input(
+            "Tarih",
+            value=parse_tr_date(j.get("date")),
+            min_value=min_visible_date(),
+            format="DD.MM.YYYY",
+            key=f"ed_date_{jid}_{i}",
+        )
+
+        tag_opts = ["Tek seferlik", "Abonelik (kota)"]
+        cur_tag_i = 1 if j.get("job_tag") == "subscription" else 0
+        etag = st.radio("İş tipi", tag_opts, index=cur_tag_i, horizontal=True, key=f"ed_tag_{jid}_{i}")
+
+        epc = st.number_input(
+            "Müşteri tutarı (₺)",
+            min_value=0.0,
+            step=500.0,
+            value=float(j.get("price_customer") or 0),
+            key=f"ed_pc_{jid}_{i}",
+        )
+
+        st.markdown("**Personel**")
+        esn = st.text_input("Personel adı", value=j.get("staff_name") or "", key=f"ed_s_{jid}_{i}")
+        esp = st.text_input("Personel tel.", value=j.get("staff_phone") or "", key=f"ed_p_{jid}_{i}")
+        etip = st.selectbox(
+            "Personel tipi",
+            list(tip_labels.values()),
+            index=list(tip_labels.values()).index(cur_tip) if cur_tip in tip_labels.values() else 0,
+            key=f"ed_jt_{jid}_{i}",
+        )
+        epw = st.number_input(
+            "Yevmiye (₺)",
+            min_value=0.0,
+            step=50.0,
+            value=float(j.get("price_worker") or 0),
+            key=f"ed_pw_{jid}_{i}",
+        )
+
+        if st.button("Güncelle", key=f"ed_btn_{jid}_{i}", type="primary", use_container_width=True):
+            if not esn.strip():
+                st.warning("Personel adı girin.")
+            else:
+                new_cid = c_map[em]
+                new_ds = format_tr_date(ed)
+                new_tag = "subscription" if "Abonelik" in etag else "one_time"
+                new_jtype = tip_rev[etip]
+                prepaid = 1 if float(epc) > 0 else 0
+
+                add_to_queue(
+                    f"İş güncelle: {em}",
+                    """UPDATE jobs SET date=%s, customer_id=%s, job_tag=%s,
+                       price_customer=%s, price_worker=%s, job_type=%s,
+                       staff_name=%s, staff_phone=%s, is_prepaid=%s
+                       WHERE id=%s""",
+                    (
+                        new_ds, new_cid, new_tag, float(epc), float(epw), new_jtype,
+                        esn.strip(), esp.strip(), prepaid, jid,
+                    ),
+                )
+                j.update(
+                    date=new_ds, customer_id=new_cid, name=em, job_tag=new_tag,
+                    price_customer=float(epc), price_worker=float(epw), job_type=new_jtype,
+                    staff_name=esn.strip(), staff_phone=esp.strip(), is_prepaid=prepaid,
+                )
+                st.rerun()
+
+
 def sync_month_from_date(ds):
     """Seçili tarihe göre ay/yıl session değerlerini güncelle."""
     parca = ds.split(".")
@@ -508,6 +594,7 @@ with tab_ekle:
 
 # ========== TAKVİM ==========
 with tab_takvim:
+    custs_edit = db.get("customers", [])
     ms = f"{sm:02d}.{sy}"
     month_jobs = [j for j in jobs_list if j.get("date") and ms in j["date"]]
 
@@ -608,18 +695,7 @@ with tab_takvim:
                     jobs_list.remove(j)
                     st.rerun()
 
-            with st.expander("✏️ Personel düzenle"):
-                st.caption("Telefon ve konum müşteri profilinden gelir (👤 Müşteri sekmesi).")
-                ns = st.text_input("Personel adı", value=j.get("staff_name") or "", key=f"ed_s_{jid}_{i}")
-                np = st.text_input("Personel tel.", value=j.get("staff_phone") or "", key=f"ed_p_{jid}_{i}")
-                if st.button("Güncelle", key=f"ed_btn_{jid}_{i}", use_container_width=True):
-                    add_to_queue(
-                        "Personel güncelle",
-                        "UPDATE jobs SET staff_name=%s, staff_phone=%s WHERE id=%s",
-                        (ns.strip(), np.strip(), j["id"]),
-                    )
-                    j.update(staff_name=ns, staff_phone=np)
-                    st.rerun()
+            render_job_edit_form(j, i, custs_edit)
             st.divider()
 
     # --- Alt: ay takvimi & bekleyen kotalar ---
