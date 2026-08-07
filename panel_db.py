@@ -65,27 +65,44 @@ def subscription_session_key(group_id):
     return (gid, "")
 
 
-def build_subscription_meta(rows):
-    """Tüm abonelik paketleri için toplam kota (tarih filtresi olmadan)."""
+def build_subscription_calendar_meta(rows):
+    """yeni.py takvim ile aynı kota mantığı: toplam paket + tarih sırasına göre adım."""
     pkg_totals = {}
-    session_no = {}
+    pkg_sessions = {}
     for row in rows:
-        gid = (row.get("group_id") if isinstance(row, dict) else row[0] or "").strip()
+        if isinstance(row, dict):
+            gid = (row.get("group_id") or "").strip()
+            d = (row.get("date") or "").strip()
+        else:
+            gid = (row[0] or "").strip()
+            d = (row[1] or "").strip() if len(row) > 1 else ""
         if not gid:
             continue
         pid = gid.split("_")[0]
         pkg_totals.setdefault(pid, set()).add(gid)
-        no = subscription_session_no(gid)
-        if no:
-            session_no[gid] = no
+        if d:
+            pkg_sessions.setdefault(pid, {})[gid] = d
+
+    session_steps = {}
+    for sessions_dict in pkg_sessions.values():
+        sorted_sessions = sorted(
+            sessions_dict.items(),
+            key=lambda x: (
+                datetime.strptime(x[1], "%d.%m.%Y") if x[1] else datetime.min,
+                x[0],
+            ),
+        )
+        for step, (gid, _) in enumerate(sorted_sessions, 1):
+            session_steps[gid] = step
+
     return {
         "pkg_totals": {pid: len(sessions) for pid, sessions in pkg_totals.items()},
-        "session_no": session_no,
+        "session_steps": session_steps,
     }
 
 
 def subscription_label(job, meta=None) -> str:
-    """Kota etiketi: [3/4] — toplam paket kotasına göre."""
+    """Kota etiketi: [3/4] — yeni.py takvimi ile aynı."""
     if job.get("job_tag") != "subscription":
         return ""
     gid = (job.get("group_id") or "").strip()
@@ -94,7 +111,7 @@ def subscription_label(job, meta=None) -> str:
     meta = meta or {}
     pid = gid.split("_")[0]
     total = meta.get("pkg_totals", {}).get(pid, 0)
-    step = meta.get("session_no", {}).get(gid) or subscription_session_no(gid)
+    step = meta.get("session_steps", {}).get(gid)
     if step and total:
         return f" [{step}/{total}]"
     return ""
@@ -272,27 +289,33 @@ def visit_group_label(group):
 
 
 def subscription_labels_merged(group, meta=None) -> str:
-    """Birleşik kart için kota etiketleri: [2/4, 3/4]."""
+    """Birleşik kart için kota etiketleri: [2/4, 3/4] — yeni.py mantığı."""
     meta = meta or {}
     j = visit_group_label(group)
     if j.get("job_tag") != "subscription":
         return ""
-    steps = []
+    gid_steps = []
     seen = set()
     for row in group:
         gid = (row.get("group_id") or "").strip()
         if not gid or gid in seen:
             continue
         seen.add(gid)
+        step = meta.get("session_steps", {}).get(gid)
+        if not step:
+            continue
         pid = gid.split("_")[0]
         total = meta.get("pkg_totals", {}).get(pid, 0)
-        step = meta.get("session_no", {}).get(gid) or subscription_session_no(gid)
-        if step and total:
-            steps.append((step, total))
-    if not steps:
+        if total:
+            gid_steps.append((step, f"{step}/{total}"))
+    if not gid_steps:
         return subscription_label(j, meta)
-    steps = sorted(set(steps), key=lambda x: x[0])
-    return " [" + ", ".join(f"{s}/{t}" for s, t in steps) + "]"
+    gid_steps.sort(key=lambda x: x[0])
+    unique = []
+    for _, label in gid_steps:
+        if label not in unique:
+            unique.append(label)
+    return " [" + ", ".join(unique) + "]"
 
 
 def visit_has_pro(group) -> bool:
@@ -440,11 +463,11 @@ def load_panel_data(admin: bool = False):
             except Exception:
                 data["expenses"] = []
             c.execute("""
-                SELECT DISTINCT group_id FROM jobs
+                SELECT group_id, date FROM jobs
                 WHERE job_tag = 'subscription'
                   AND group_id IS NOT NULL AND TRIM(group_id) <> ''
             """)
-            data["subscription_meta"] = build_subscription_meta(c.fetchall())
+            data["subscription_meta"] = build_subscription_calendar_meta(c.fetchall())
             return data
     finally:
         conn.close()

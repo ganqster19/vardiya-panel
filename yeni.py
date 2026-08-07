@@ -12,7 +12,9 @@ from panel_auth import require_auth
 from panel_db import (
     group_jobs_by_visit, visit_group_label, summarize_personnel,
     format_personnel_badge, personel_listesi_ozet, expand_personnel_by_type,
-    build_visit_db_rows, JOB_INSERT_SQL,
+    build_visit_db_rows, JOB_INSERT_SQL, build_subscription_calendar_meta,
+    subscription_labels_merged, sort_visit_groups, visit_has_pro,
+    visit_delete_action,
 )
 
 # --- SAYFA AYARLARI ---
@@ -716,30 +718,8 @@ with tabs[1]:
     ms = f"{sm:02d}.{sy}"
     
     month_jobs = [j for j in jobs_list if j['date'] and ms in j['date']]
-    pkg_totals = {}
-    pkg_sessions = {}
-    
-    for j in jobs_list:
-        if j.get('job_tag') == 'subscription' and j.get('group_id'):
-            pid = j['group_id'].split('_')[0]
-            if pid not in pkg_totals: pkg_totals[pid] = set()
-            pkg_totals[pid].add(j['group_id'])
-            if j.get('date'):
-                if pid not in pkg_sessions: pkg_sessions[pid] = {}
-                pkg_sessions[pid][j['group_id']] = j['date']
+    sub_meta = build_subscription_calendar_meta(jobs_list)
 
-    session_steps = {}
-    for pid, sessions_dict in pkg_sessions.items():
-        sorted_sessions = sorted(sessions_dict.items(), key=lambda x: (datetime.strptime(x[1], "%d.%m.%Y") if x[1] else datetime.min, x[0]))
-        for step, (gid, d_str) in enumerate(sorted_sessions, 1): session_steps[gid] = step
-            
-    def get_sub_label(job):
-        if job.get('job_tag') == 'subscription' and job.get('group_id'):
-            pid = job['group_id'].split('_')[0]
-            gid = job['group_id']
-            if gid in session_steps: return f" [{session_steps[gid]}/{len(pkg_totals.get(pid, []))}]"
-        return ""
-    
     with cc:
         day_map = {}
         for group in group_jobs_by_visit(month_jobs):
@@ -752,7 +732,7 @@ with tabs[1]:
             )
             day_map[d]['net'] += visit_net
             day_map[d]['toplam_kisi'] += len(group)
-            cust_display = f"{j['name']}{get_sub_label(j)}"
+            cust_display = f"{j['name']}{subscription_labels_merged(group, sub_meta)}"
             if cust_display not in day_map[d]['jobs']:
                 day_map[d]['jobs'][cust_display] = {
                     'price': 0.0, 'tag': j.get('job_tag', 'one_time'), 'kisi_sayisi': 0,
@@ -782,7 +762,7 @@ with tabs[1]:
         sd = st.session_state.sel_date
         st.markdown(f"### 📅 {sd} İşleri")
         djs = [j for j in month_jobs if j['date'] == sd]
-        visit_groups = group_jobs_by_visit(djs)
+        visit_groups = sort_visit_groups(group_jobs_by_visit(djs))
 
         if visit_groups:
             st.caption(f"📍 **{len(visit_groups)}** ziyaret · 👥 **{len(djs)}** personel")
@@ -790,19 +770,29 @@ with tabs[1]:
         if not visit_groups:
             st.info("Bu tarihte planlanmış iş yok.")
         else:
+            prev_tier = None
             for gi, group in enumerate(visit_groups):
+                tier = 0 if visit_has_pro(group) else 1
+                if prev_tier == 0 and tier == 1:
+                    st.markdown("---")
+                    st.caption("🎓 Öğrenci personelli işler")
+                prev_tier = tier
+
                 j = visit_group_label(group)
                 counts, ucret, names, phones = summarize_personnel(group)
                 badge = format_personnel_badge(counts, ucret)
                 curr_tag = j.get('job_tag', 'one_time')
                 tag_icon = "🔄" if curr_tag == 'subscription' else "🔹"
-                sub_label = get_sub_label(j)
+                sub_label = subscription_labels_merged(group, sub_meta)
                 gid = j.get('group_id')
                 old_date = j.get('date') or ''
                 gkey = gid or j.get('id', gi)
+                session_gids = {(r.get('group_id') or '').strip() for r in group if (r.get('group_id') or '').strip()}
 
                 with st.expander(f"{tag_icon} {j['name']}{sub_label} · 👷 {badge}"):
-                    if curr_tag == 'subscription' and gid:
+                    if len(session_gids) > 1:
+                        st.info("Bu kartta birden fazla abonelik kotası birleşik görünüyor.")
+                    if curr_tag == 'subscription' and gid and len(session_gids) == 1:
                         if st.button("🔙 Tarihten Kaldır (Kotaya Geri Al)", key=f"back_{gkey}_{gi}"):
                             add_to_queue("Kotaya Geri Al", "UPDATE jobs SET date='' WHERE group_id=%s", (gid,))
                             for r in group:
@@ -859,7 +849,7 @@ with tabs[1]:
                     )
                     if int(g_pro_n) + int(g_stu_n) < 1:
                         st.warning("En az 1 personel olmalı.")
-                    elif counts_differ:
+                    elif counts_differ and len(session_gids) <= 1:
                         if st.button("💾 Grubu Güncelle", key=f"grp_upd_{gkey}_{gi}", type="secondary"):
                             existing = {"pro": names["pro"], "student": names["student"], "phones": phones}
                             personeller = expand_personnel_by_type(
@@ -950,14 +940,9 @@ with tabs[1]:
                             st.rerun()
 
                     if st.button("🗑️ Ziyareti Sil", key=f"del_{gkey}_{gi}"):
-                        if gid and curr_tag == 'subscription':
-                            add_to_queue("Silme", "DELETE FROM jobs WHERE group_id=%s", (gid,))
-                        elif gid:
-                            add_to_queue(
-                                "Silme",
-                                "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
-                                (gid, old_date),
-                            )
+                        del_action = visit_delete_action(group)
+                        if del_action:
+                            add_to_queue("Silme", del_action[0], del_action[1])
                         else:
                             for row in group:
                                 add_to_queue("Silme", "DELETE FROM jobs WHERE id=%s", (row['id'],))
@@ -974,7 +959,7 @@ with tabs[1]:
         for uj in unscheduled:
             pid = uj['group_id'].split('_')[0]
             if pid not in pkgs:
-                pkgs[pid] = {'name': uj['name'], 'sessions': set(), 'total_quota': len(pkg_totals.get(pid, []))}
+                pkgs[pid] = {'name': uj['name'], 'sessions': set(), 'total_quota': sub_meta.get('pkg_totals', {}).get(pid, 0)}
             pkgs[pid]['sessions'].add(uj['group_id'])
         
         if not pkgs:
