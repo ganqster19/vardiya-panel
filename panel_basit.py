@@ -16,7 +16,7 @@ from panel_db import (
     job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date,
     group_jobs_by_visit, summarize_personnel, format_personnel_badge, format_personnel_html,
     personel_listesi_ozet, expand_personnel_by_type, build_visit_db_rows, visit_group_label,
-    visit_delete_action,
+    visit_delete_action, subscription_label,
 )
 from panel_auth import require_auth
 
@@ -214,6 +214,8 @@ def refresh_data():
 
 if not st.session_state.db_data:
     refresh_data()
+elif "subscription_meta" not in st.session_state.db_data:
+    refresh_data()
 
 
 def add_to_queue(desc, query, params, is_bulk=False):
@@ -360,7 +362,10 @@ def render_visit_edit_form(group, i, customers):
                 personeller = expand_personnel_by_type(
                     e_pro_n, e_pro_u, e_stu_n, e_stu_u, existing,
                 )
-                new_gid = gid or str(uuid.uuid4())[:8]
+                new_gid = next(
+                    ((r.get("group_id") or "").strip() for r in group if (r.get("group_id") or "").strip()),
+                    "",
+                ) or str(uuid.uuid4())[:8]
                 new_rows = build_visit_db_rows(
                     new_gid, new_ds, new_cid, new_tag, float(epc), personeller,
                 )
@@ -592,33 +597,12 @@ with tab_ekle:
 # ========== TAKVİM ==========
 with tab_takvim:
     custs_edit = db.get("customers", [])
+    sub_meta = db.get("subscription_meta", {})
     ms = f"{sm:02d}.{sy}"
     month_jobs = [j for j in jobs_list if j.get("date") and ms in j["date"]]
 
-    pkg_totals, pkg_sessions, session_steps = {}, {}, {}
-
-    for j in jobs_list:
-        if j.get("job_tag") == "subscription" and j.get("group_id"):
-            pid = j["group_id"].split("_")[0]
-            pkg_totals.setdefault(pid, set()).add(j["group_id"])
-            if j.get("date"):
-                pkg_sessions.setdefault(pid, {})[j["group_id"]] = j["date"]
-
-    for pid, sessions_dict in pkg_sessions.items():
-        sorted_sessions = sorted(
-            sessions_dict.items(),
-            key=lambda x: (datetime.strptime(x[1], "%d.%m.%Y") if x[1] else datetime.min, x[0]),
-        )
-        for step, (gid, _) in enumerate(sorted_sessions, 1):
-            session_steps[gid] = step
-
     def get_sub_label(job):
-        if job.get("job_tag") == "subscription" and job.get("group_id"):
-            gid = job["group_id"]
-            pid = gid.split("_")[0]
-            if gid in session_steps:
-                return f" [{session_steps[gid]}/{len(pkg_totals.get(pid, []))}]"
-        return ""
+        return subscription_label(job, sub_meta)
 
     day_map = {}
     for group in group_jobs_by_visit(month_jobs):
@@ -734,7 +718,11 @@ with tab_takvim:
         for uj in unscheduled:
             pid = uj["group_id"].split("_")[0]
             if pid not in pkgs:
-                pkgs[pid] = {"name": uj["name"], "sessions": {}, "total": len(pkg_totals.get(pid, []))}
+                pkgs[pid] = {
+                    "name": uj["name"],
+                    "sessions": {},
+                    "total": sub_meta.get("pkg_totals", {}).get(pid, 0),
+                }
             gid = uj.get("group_id")
             pkgs[pid]["sessions"].setdefault(gid, []).append(uj)
 

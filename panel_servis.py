@@ -11,7 +11,7 @@ from datetime import datetime, date
 from panel_db import (
     load_panel_data, job_musteri_telefon, job_musteri_konum, render_action_link,
     min_visible_date, group_jobs_by_visit, summarize_personnel, format_personnel_html,
-    visit_group_label,
+    visit_group_label, subscription_label,
 )
 from panel_auth import require_auth
 
@@ -111,6 +111,7 @@ if datetime.strptime(st.session_state.servis_date, "%d.%m.%Y").date() < min_d:
 now = datetime.now()
 db = st.session_state.servis_data
 jobs = db.get("jobs", [])
+sub_meta = db.get("subscription_meta", {})
 
 # --- Üst bar ---
 c1, c2, c3 = st.columns([1, 2, 1])
@@ -164,7 +165,7 @@ else:
         contact = job_musteri_telefon(j)
         loc = maps_link(job_musteri_konum(j))
         tag = "🔄" if j.get("job_tag") == "subscription" else "🔹"
-
+        sub = subscription_label(j, sub_meta)
         meta_lines = [
             f"👷 {personel_line}",
             f"📞 Müşteri: <b>{contact or '—'}</b>",
@@ -174,7 +175,7 @@ else:
 
         st.markdown(
             f'<div class="servis-card">'
-            f'<h3>{tag} {musteri}</h3>'
+            f'<h3>{tag} {musteri}{sub}</h3>'
             f'<div class="servis-meta">' + "<br>".join(meta_lines) + "</div>"
             f"</div>",
             unsafe_allow_html=True,

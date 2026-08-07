@@ -42,6 +42,63 @@ def render_action_link(label, url=None, new_tab=False):
 TIP_LABELS = {"pro": "Profesyonel", "student": "Öğrenci"}
 
 
+def subscription_session_no(group_id) -> int | None:
+    """Abonelik oturum sırası: abc123_2 → 3 (group_id son eki + 1)."""
+    gid = (group_id or "").strip()
+    if not gid:
+        return None
+    parts = gid.rsplit("_", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return int(parts[1]) + 1
+    return None
+
+
+def subscription_session_key(group_id):
+    """Oturum anahtarı: (paket_id, oturum_indeksi)."""
+    gid = (group_id or "").strip()
+    if not gid:
+        return None
+    parts = gid.rsplit("_", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return (parts[0], parts[1])
+    return (gid, "")
+
+
+def build_subscription_meta(rows):
+    """Tüm abonelik paketleri için toplam kota (tarih filtresi olmadan)."""
+    pkg_totals = {}
+    session_no = {}
+    for row in rows:
+        gid = (row.get("group_id") if isinstance(row, dict) else row[0] or "").strip()
+        if not gid:
+            continue
+        pid = gid.split("_")[0]
+        pkg_totals.setdefault(pid, set()).add(gid)
+        no = subscription_session_no(gid)
+        if no:
+            session_no[gid] = no
+    return {
+        "pkg_totals": {pid: len(sessions) for pid, sessions in pkg_totals.items()},
+        "session_no": session_no,
+    }
+
+
+def subscription_label(job, meta=None) -> str:
+    """Kota etiketi: [3/4] — toplam paket kotasına göre."""
+    if job.get("job_tag") != "subscription":
+        return ""
+    gid = (job.get("group_id") or "").strip()
+    if not gid:
+        return ""
+    meta = meta or {}
+    pid = gid.split("_")[0]
+    total = meta.get("pkg_totals", {}).get(pid, 0)
+    step = meta.get("session_no", {}).get(gid) or subscription_session_no(gid)
+    if step and total:
+        return f" [{step}/{total}]"
+    return ""
+
+
 def job_visit_key(job):
     """Aynı ziyarete ait satırları grupla.
 
@@ -54,6 +111,11 @@ def job_visit_key(job):
     tag = job.get("job_tag") or "one_time"
 
     if tag == "subscription":
+        sess = subscription_session_key(gid)
+        if date and cid is not None and sess and sess[1]:
+            return (date, "sub", str(cid), sess[1])
+        if sess and sess[1]:
+            return (date, "sub", sess[0], sess[1])
         if gid:
             return (date, "sub", gid)
         if cid is not None:
@@ -75,8 +137,15 @@ def visit_delete_action(group):
     date = j.get("date") or ""
     cid = j.get("customer_id")
 
-    if tag == "subscription" and gid:
-        return ("DELETE FROM jobs WHERE group_id=%s", (gid,))
+    if tag == "subscription":
+        gids = {(r.get("group_id") or "").strip() for r in group if (r.get("group_id") or "").strip()}
+        if len(gids) == 1:
+            return ("DELETE FROM jobs WHERE group_id=%s", (next(iter(gids)),))
+        if len(gids) > 1:
+            return ("DELETE FROM jobs WHERE group_id = ANY(%s)", (list(gids),))
+        ids = [r["id"] for r in group if r.get("id")]
+        if ids:
+            return ("DELETE FROM jobs WHERE id = ANY(%s)", (ids,))
     if tag == "one_time" and date and cid is not None:
         return (
             "DELETE FROM jobs WHERE customer_id=%s AND COALESCE(date, '')=%s AND job_tag=%s",
@@ -328,6 +397,12 @@ def load_panel_data(admin: bool = False):
                 data["expenses"] = c.fetchall()
             except Exception:
                 data["expenses"] = []
+            c.execute("""
+                SELECT DISTINCT group_id FROM jobs
+                WHERE job_tag = 'subscription'
+                  AND group_id IS NOT NULL AND TRIM(group_id) <> ''
+            """)
+            data["subscription_meta"] = build_subscription_meta(c.fetchall())
             return data
     finally:
         conn.close()
