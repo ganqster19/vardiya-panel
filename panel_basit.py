@@ -173,6 +173,9 @@ st.markdown("""
 
     div.stButton > button { min-height: 48px; font-size: 16px; border-radius: 10px; }
     div[data-testid="stTabs"] button { min-height: 44px; font-size: 14px; }
+    .nav-day-btn div.stButton > button {
+        min-height: 56px; font-size: 17px; font-weight: 700;
+    }
     @media (max-width: 640px) {
         .block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
         h1 { font-size: 1.35rem !important; }
@@ -210,9 +213,6 @@ def refresh_data():
 
 if not st.session_state.db_data:
     refresh_data()
-
-if parse_tr_date(st.session_state.sel_date) < min_visible_date():
-    st.session_state.sel_date = format_tr_date(min_visible_date())
 
 
 def add_to_queue(desc, query, params, is_bulk=False):
@@ -292,37 +292,54 @@ def render_job_card(j, sub_label=""):
 
 
 def sync_month_from_date(ds):
-    """Seçili tarihe göre ay/yıl seçicilerini güncelle (widget'lardan önce çağrılmalı)."""
+    """Seçili tarihe göre ay/yıl session değerlerini güncelle."""
     parca = ds.split(".")
     if len(parca) == 3:
         st.session_state.basit_sm = int(parca[1])
         st.session_state.basit_sy = int(parca[2])
 
 
-def apply_pending_month_updates(now):
-    """Selectbox render edilmeden önce bekleyen ay/tarih güncellemelerini uygula."""
+def apply_date_navigation(now):
+    """Tüm tarih/ay değişimleri widget'lardan önce — tek kaynak: sel_date."""
+    min_d = min_visible_date()
+
+    day_nav = st.session_state.pop("_day_nav", None)
+    if day_nav == "prev":
+        d = parse_tr_date(st.session_state.sel_date) - timedelta(days=1)
+        if d >= min_d:
+            st.session_state.sel_date = format_tr_date(d)
+    elif day_nav == "next":
+        d = parse_tr_date(st.session_state.sel_date) + timedelta(days=1)
+        st.session_state.sel_date = format_tr_date(d)
+    elif day_nav == "today":
+        st.session_state.sel_date = format_tr_date(date.today())
+
+    if parse_tr_date(st.session_state.sel_date) < min_d:
+        st.session_state.sel_date = format_tr_date(min_d)
+
+    sync_month_from_date(st.session_state.sel_date)
+
     if "basit_sm" not in st.session_state:
         st.session_state.basit_sm = now.month
     if "basit_sy" not in st.session_state:
         st.session_state.basit_sy = now.year
 
-    nav = st.session_state.pop("_month_nav", None)
-    if nav == "prev":
+    month_nav = st.session_state.pop("_month_nav", None)
+    if month_nav == "prev":
         sm_v, sy_v = st.session_state.basit_sm, st.session_state.basit_sy
         st.session_state.basit_sm = 12 if sm_v == 1 else sm_v - 1
         if sm_v == 1:
             st.session_state.basit_sy = sy_v - 1
-    elif nav == "next":
+    elif month_nav == "next":
         sm_v, sy_v = st.session_state.basit_sm, st.session_state.basit_sy
         st.session_state.basit_sm = 1 if sm_v == 12 else sm_v + 1
         if sm_v == 12:
             st.session_state.basit_sy = sy_v + 1
-    elif nav == "today":
+    elif month_nav == "today":
         st.session_state.sel_date = format_tr_date(date.today())
         sync_month_from_date(st.session_state.sel_date)
 
-    if st.session_state.pop("_sync_month_from_date", False):
-        sync_month_from_date(st.session_state.sel_date)
+    st.session_state.pop("basit_gun_picker", None)
 
 
 db = st.session_state.db_data
@@ -332,7 +349,10 @@ expenses_list = db.get("expenses", [])
 now = datetime.now()
 q_len = len(st.session_state.pending_actions)
 
-apply_pending_month_updates(now)
+apply_date_navigation(now)
+sm = st.session_state.basit_sm
+sy = st.session_state.basit_sy
+sd_global = st.session_state.sel_date
 
 # --- ÜST BAR ---
 st.markdown('<div class="mobil-bar">', unsafe_allow_html=True)
@@ -351,13 +371,7 @@ with b3:
         commit_queue()
 st.markdown("</div>", unsafe_allow_html=True)
 
-ay_row1, ay_row2, ay_row3 = st.columns([1, 1, 1])
-with ay_row1:
-    sy = st.selectbox("Yıl", [now.year, now.year + 1], key="basit_sy", label_visibility="collapsed")
-with ay_row2:
-    sm = st.selectbox("Ay", range(1, 13), key="basit_sm", format_func=lambda x: calendar.month_name[x])
-with ay_row3:
-    st.caption(f"{len(jobs_list)} iş\n{len(personnel)} personel")
+st.caption(f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global}")
 
 st.title("📱 Vardiya")
 tab_ekle, tab_takvim, tab_musteri, tab_personel, tab_gider = st.tabs(
@@ -532,38 +546,37 @@ with tab_takvim:
         day_map[d]["jobs"][label]["kisi"] += 1
 
     sd = st.session_state.sel_date
-    bugun = format_tr_date(date.today())
-
-    # --- Üst: tarih gezintisi (servis paneli gibi) ---
-    nav1, nav2, nav3 = st.columns(3)
     min_d = min_visible_date()
+    cur = parse_tr_date(sd)
+
+    st.markdown('<div class="nav-day-btn">', unsafe_allow_html=True)
+    nav1, nav2, nav3 = st.columns(3)
     with nav1:
         if st.button("◀ Dün", key="basit_dun", use_container_width=True):
-            d = datetime.strptime(sd, "%d.%m.%Y").date() - timedelta(days=1)
-            if d >= min_d:
-                st.session_state.sel_date = d.strftime("%d.%m.%Y")
-                st.session_state._sync_month_from_date = True
+            st.session_state._day_nav = "prev"
             st.rerun()
     with nav2:
-        gun = st.date_input(
-            "Gün",
-            max(parse_tr_date(sd), min_d),
-            min_value=min_d,
-            key="basit_gun_picker",
-            label_visibility="collapsed",
-        )
-        yeni = gun.strftime("%d.%m.%Y")
-        if yeni != sd:
-            st.session_state.sel_date = yeni
-            st.session_state._sync_month_from_date = True
+        if st.button("📍 Bugün", key="basit_bugun_nav", use_container_width=True):
+            st.session_state._day_nav = "today"
             st.rerun()
     with nav3:
         if st.button("Yarın ▶", key="basit_yarin", use_container_width=True):
-            d = datetime.strptime(sd, "%d.%m.%Y").date() + timedelta(days=1)
-            st.session_state.sel_date = d.strftime("%d.%m.%Y")
-            st.session_state._sync_month_from_date = True
+            st.session_state._day_nav = "next"
             st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    gun = st.date_input(
+        "Gün seç",
+        value=cur,
+        min_value=min_d,
+        format="DD.MM.YYYY",
+    )
+    picked = format_tr_date(gun)
+    if picked != sd:
+        st.session_state.sel_date = picked
+        st.rerun()
+
+    sd = st.session_state.sel_date
     st.markdown(f'<div class="day-header">📅 {sd}</div>', unsafe_allow_html=True)
 
     djs = [j for j in jobs_list if j.get("date") == sd]
@@ -615,7 +628,7 @@ with tab_takvim:
         if nav_a.button("◀ Önceki ay", key="basit_prev_m", use_container_width=True):
             st.session_state._month_nav = "prev"
             st.rerun()
-        if nav_b.button("📍 Bugün", key="basit_bugun", use_container_width=True):
+        if nav_b.button("📍 Bugün", key="basit_bugun_cal", use_container_width=True):
             st.session_state._month_nav = "today"
             st.rerun()
         if nav_c.button("Sonraki ay ▶", key="basit_next_m", use_container_width=True):
@@ -758,6 +771,17 @@ with tab_personel:
 # ========== GİDER ==========
 with tab_gider:
     st.caption("Gider kaydı girin. Ana panel analizine otomatik yansır.")
+    g1, g2, g3 = st.columns([1, 2, 1])
+    with g1:
+        if st.button("◀ Ay", key="gider_prev_m", use_container_width=True):
+            st.session_state._month_nav = "prev"
+            st.rerun()
+    with g2:
+        st.markdown(f"**{calendar.month_name[sm]} {sy}**")
+    with g3:
+        if st.button("Ay ▶", key="gider_next_m", use_container_width=True):
+            st.session_state._month_nav = "next"
+            st.rerun()
     ms_gider = f"{sm:02d}.{sy}"
 
     with st.form("basit_gider_form"):
