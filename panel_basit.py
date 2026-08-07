@@ -193,6 +193,17 @@ if "db_data" not in st.session_state:
     st.session_state.db_data = {}
 
 
+def format_tr_date(d):
+    return d.strftime("%d.%m.%Y")
+
+
+def parse_tr_date(s):
+    try:
+        return datetime.strptime(s, "%d.%m.%Y").date()
+    except (ValueError, TypeError):
+        return date.today()
+
+
 def refresh_data():
     st.session_state.db_data = load_panel_data(admin=False)
 
@@ -232,17 +243,6 @@ def commit_queue():
         st.error(f"Kayıt hatası: {e}")
     finally:
         conn.close()
-
-
-def format_tr_date(d):
-    return d.strftime("%d.%m.%Y")
-
-
-def parse_tr_date(s):
-    try:
-        return datetime.strptime(s, "%d.%m.%Y").date()
-    except (ValueError, TypeError):
-        return date.today()
 
 
 def staff_map(personnel):
