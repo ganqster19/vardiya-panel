@@ -2,6 +2,7 @@
 import streamlit as st
 import psycopg2
 from datetime import datetime, timedelta, date
+from typing import Optional
 from psycopg2.extras import RealDictCursor
 
 RETENTION_DAYS = 1  # dün ve sonrası görünür; daha eski kayıtlar gizlenir
@@ -42,7 +43,7 @@ def render_action_link(label, url=None, new_tab=False):
 TIP_LABELS = {"pro": "Profesyonel", "student": "Öğrenci"}
 
 
-def subscription_session_no(group_id) -> int | None:
+def subscription_session_no(group_id) -> Optional[int]:
     """Abonelik oturum sırası: abc123_2 → 3 (group_id son eki + 1)."""
     gid = (group_id or "").strip()
     if not gid:
@@ -102,8 +103,8 @@ def subscription_label(job, meta=None) -> str:
 def job_visit_key(job):
     """Aynı ziyarete ait satırları grupla.
 
-    - Abonelik: group_id (aynı kota oturumu)
-    - Tek seferlik: aynı müşteri + aynı gün → tek kart (farklı group_id olsa bile)
+    - Abonelik: aynı müşteri + gün + paket → tek kart (2/4, 3/4 birlikte)
+    - Tek seferlik: aynı müşteri + gün → tek kart
     """
     date = job.get("date") or ""
     gid = (job.get("group_id") or "").strip()
@@ -111,6 +112,9 @@ def job_visit_key(job):
     tag = job.get("job_tag") or "one_time"
 
     if tag == "subscription":
+        pid = gid.split("_")[0] if gid else ""
+        if date and cid is not None and pid:
+            return (date, "subpkg", str(cid), pid)
         sess = subscription_session_key(gid)
         if date and cid is not None and sess and sess[1]:
             return (date, "sub", str(cid), sess[1])
@@ -267,12 +271,50 @@ def visit_group_label(group):
     return group[0] if group else {}
 
 
+def subscription_labels_merged(group, meta=None) -> str:
+    """Birleşik kart için kota etiketleri: [2/4, 3/4]."""
+    meta = meta or {}
+    j = visit_group_label(group)
+    if j.get("job_tag") != "subscription":
+        return ""
+    steps = []
+    seen = set()
+    for row in group:
+        gid = (row.get("group_id") or "").strip()
+        if not gid or gid in seen:
+            continue
+        seen.add(gid)
+        pid = gid.split("_")[0]
+        total = meta.get("pkg_totals", {}).get(pid, 0)
+        step = meta.get("session_no", {}).get(gid) or subscription_session_no(gid)
+        if step and total:
+            steps.append((step, total))
+    if not steps:
+        return subscription_label(j, meta)
+    steps = sorted(set(steps), key=lambda x: x[0])
+    return " [" + ", ".join(f"{s}/{t}" for s, t in steps) + "]"
+
+
+def visit_has_pro(group) -> bool:
+    counts, _, _, _ = summarize_personnel(group)
+    return counts.get("pro", 0) > 0
+
+
+def visit_customer_name(group) -> str:
+    return (visit_group_label(group).get("name") or "").casefold()
+
+
+def sort_visit_groups(groups):
+    """Önce profesyonelli işler (A-Z), sonra yalnızca öğrencili işler (A-Z)."""
+    return sorted(groups, key=lambda g: (0 if visit_has_pro(g) else 1, visit_customer_name(g)))
+
+
 def min_visible_date() -> date:
     """Kısıtlı panellerde görülebilir en eski gün (dün)."""
     return date.today() - timedelta(days=RETENTION_DAYS)
 
 
-def parse_tr_date_str(ds) -> date | None:
+def parse_tr_date_str(ds) -> Optional[date]:
     if not ds or not str(ds).strip():
         return None
     try:
