@@ -39,6 +39,122 @@ def render_action_link(label, url=None, new_tab=False):
         )
 
 
+TIP_LABELS = {"pro": "Profesyonel", "student": "Öğrenci"}
+
+
+def job_visit_key(job):
+    """Aynı ziyarete ait satırları grupla (tarih + group_id)."""
+    return (job.get("date") or "", job.get("group_id") or str(job.get("id")))
+
+
+def group_jobs_by_visit(jobs):
+    """İş satırlarını ziyaret gruplarına ayır."""
+    groups, order = {}, []
+    for j in jobs:
+        k = job_visit_key(j)
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(j)
+    return [groups[k] for k in order]
+
+
+def summarize_personnel(rows):
+    """Gruptaki personeli tip ve sayıya göre özetle."""
+    counts = {"pro": 0, "student": 0}
+    ucret = {"pro": 0.0, "student": 0.0}
+    names = {"pro": [], "student": []}
+    phones = {"pro": [], "student": []}
+    for r in rows:
+        tip = r.get("job_type") or "pro"
+        if tip not in counts:
+            tip = "pro"
+        counts[tip] += 1
+        ucret[tip] = float(r.get("price_worker") or 0)
+        if r.get("staff_name"):
+            names[tip].append(r.get("staff_name"))
+        if r.get("staff_phone") is not None:
+            phones[tip].append(r.get("staff_phone") or "")
+    return counts, ucret, names, phones
+
+
+def format_personnel_badge(counts, ucret=None):
+    parts = []
+    for tip in ("pro", "student"):
+        n = counts.get(tip, 0)
+        if n > 0:
+            lbl = TIP_LABELS[tip]
+            u = ""
+            if ucret is not None and ucret.get(tip):
+                u = f" · {ucret[tip]:,.0f} ₺/kişi"
+            parts.append(f"**{n}** {lbl}{u}")
+    return " · ".join(parts) if parts else "Personel yok"
+
+
+def format_personnel_html(counts, ucret=None, names=None, phones=None):
+    parts = []
+    for tip in ("pro", "student"):
+        n = counts.get(tip, 0)
+        if n > 0:
+            lbl = TIP_LABELS[tip]
+            u = f" · {ucret[tip]:,.0f} ₺/kişi" if ucret and ucret.get(tip) else ""
+            parts.append(f"<b>{n}</b> {lbl}{u}")
+    line = " · ".join(parts) if parts else "Personel yok"
+    if names:
+        det = []
+        for tip in ("pro", "student"):
+            for nm, ph in zip(names.get(tip, []), phones.get(tip, [])):
+                det.append(f"{nm}" + (f" ({ph})" if ph else ""))
+        if det:
+            line += "<br><span style='opacity:0.85'>" + ", ".join(det) + "</span>"
+    return line
+
+
+def personel_listesi_ozet(personeller):
+    counts = {"pro": 0, "student": 0}
+    ucret = {"pro": 0.0, "student": 0.0}
+    for p in personeller:
+        tip = p.get("tip") or "pro"
+        counts[tip] = counts.get(tip, 0) + 1
+        ucret[tip] = float(p.get("ucret") or 0)
+    return format_personnel_badge(counts, ucret)
+
+
+def expand_personnel_by_type(pro_n, pro_ucret, student_n, student_ucret, existing=None):
+    """Tip ve sayıdan personel listesi oluştur."""
+    existing = existing or {"pro": [], "student": [], "phones": {"pro": [], "student": []}}
+    result = []
+    for i in range(int(pro_n)):
+        name = existing["pro"][i] if i < len(existing["pro"]) else f"Profesyonel {i + 1}"
+        phone = existing["phones"]["pro"][i] if i < len(existing["phones"]["pro"]) else ""
+        result.append({"tip": "pro", "ucret": float(pro_ucret), "name": name, "phone": phone})
+    for i in range(int(student_n)):
+        name = existing["student"][i] if i < len(existing["student"]) else f"Öğrenci {i + 1}"
+        phone = existing["phones"]["student"][i] if i < len(existing["phones"]["student"]) else ""
+        result.append({"tip": "student", "ucret": float(student_ucret), "name": name, "phone": phone})
+    return result
+
+
+def build_visit_db_rows(group_id, date_str, customer_id, job_tag, price_customer, personeller):
+    """Tek ziyaret için DB insert satırları."""
+    rows = []
+    ilk = True
+    for p in personeller:
+        cut = float(price_customer) if ilk else 0.0
+        ilk = False
+        prepaid = 1 if cut > 0 else 0
+        rows.append((
+            group_id, date_str, customer_id, p["tip"], p["ucret"], cut, job_tag, prepaid,
+            None, None, p.get("name"), p.get("phone") or None,
+        ))
+    return rows
+
+
+def visit_group_label(group):
+    """Grup temsil satırı."""
+    return group[0] if group else {}
+
+
 def min_visible_date() -> date:
     """Kısıtlı panellerde görülebilir en eski gün (dün)."""
     return date.today() - timedelta(days=RETENTION_DAYS)

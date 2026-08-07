@@ -9,6 +9,11 @@ from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
 from _debug_perf import PerfTimer, perf_log
 from panel_auth import require_auth
+from panel_db import (
+    group_jobs_by_visit, visit_group_label, summarize_personnel,
+    format_personnel_badge, personel_listesi_ozet, expand_personnel_by_type,
+    build_visit_db_rows, JOB_INSERT_SQL,
+)
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Vardiya (Offline & Hızlı)", page_icon="⚡", layout="wide")
@@ -96,7 +101,6 @@ st.markdown("""
 
 # --- SESSION STATES ---
 if 'draft_jobs' not in st.session_state: st.session_state.draft_jobs = [] 
-if 'is_builder_personel' not in st.session_state: st.session_state.is_builder_personel = []
 if 'pending_actions' not in st.session_state: st.session_state.pending_actions = [] 
 if 'sel_date' not in st.session_state: st.session_state.sel_date = datetime.now().strftime("%d.%m.%Y")
 if 'db_data' not in st.session_state: st.session_state.db_data = {}
@@ -599,32 +603,17 @@ with tabs[0]:
         pm = pc2.radio("Bu tutar...", ["Günlük", "Toplam"], horizontal=True, key="ib_pm",
                         help="Günlük: her ziyarette ayrı alınır. Toplam: tüm iş için bir kez alınır (ilk ziyarette).")
 
-        st.markdown("#### 3️⃣ Personel Ekle")
-        p1, p2, p3 = st.columns([2, 2, 1])
-        yeni_tip = p1.selectbox("Tip", ["Öğrenci", "Profesyonel"], key="ib_yenitip")
-        yeni_ucret = p2.number_input("Yevmiye (₺)", 0.0, step=50.0, key="ib_yeniucret")
-        if p3.button("➕ Ekle", use_container_width=True):
-            st.session_state.is_builder_personel.append({
-                'tip': 'student' if yeni_tip == "Öğrenci" else 'pro',
-                'ucret': yeni_ucret
-            })
-            st.rerun()
+        st.markdown("#### 3️⃣ Personel (tip ve sayı)")
+        pp1, pp2 = st.columns(2)
+        ib_pro_n = pp1.number_input("Profesyonel sayısı", min_value=0, max_value=20, value=1, key="ib_pro_n")
+        ib_stu_n = pp2.number_input("Öğrenci sayısı", min_value=0, max_value=20, value=0, key="ib_stu_n")
+        pp3, pp4 = st.columns(2)
+        ib_pro_u = pp3.number_input("Prof. yevmiye (₺)", min_value=0.0, step=50.0, key="ib_pro_u")
+        ib_stu_u = pp4.number_input("Öğrenci yevmiye (₺)", min_value=0.0, step=50.0, key="ib_stu_u")
+        st.caption("Aynı ziyarette birden fazla personel tip/sayı ile girilir.")
 
-        if st.session_state.is_builder_personel:
-            for idx, p in enumerate(st.session_state.is_builder_personel):
-                rc1, rc2 = st.columns([5, 1])
-                ico = "🎓" if p['tip'] == 'student' else "👔"
-                etiket = "Öğrenci" if p['tip'] == 'student' else "Profesyonel"
-                rc1.write(f"{ico} {etiket} — {p['ucret']:,.0f} ₺/ziyaret")
-                if rc2.button("🗑️", key=f"ib_rm_{idx}"):
-                    st.session_state.is_builder_personel.pop(idx)
-                    st.rerun()
-        else:
-            st.caption("Henüz personel eklenmedi. Yukarıdan en az 1 kişi ekleyin.")
-
-        st.divider()
-
-        # --- CANLI ÖZET ---
+        personel_sayisi = int(ib_pro_n) + int(ib_stu_n)
+        gunluk_maliyet = int(ib_pro_n) * float(ib_pro_u) + int(ib_stu_n) * float(ib_stu_u)
         if jt == "Tek Seferlik (Tarihli)":
             tr = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"]
             onizleme_ziyaret = 0
@@ -635,8 +624,9 @@ with tabs[0]:
         else:
             onizleme_ziyaret = int(kota)
 
-        personel_sayisi = len(st.session_state.is_builder_personel)
-        gunluk_maliyet = sum(p['ucret'] for p in st.session_state.is_builder_personel)
+        st.divider()
+
+        # --- CANLI ÖZET ---
         toplam_maliyet = gunluk_maliyet * onizleme_ziyaret
         toplam_gelir = tp * onizleme_ziyaret if pm == "Günlük" else tp
         net = toplam_gelir - toplam_maliyet
@@ -650,9 +640,10 @@ with tabs[0]:
         if st.button("✅ Sepete Ekle", type="primary", use_container_width=True):
             if sc == "-":
                 st.warning("Lütfen bir müşteri seçin.")
-            elif not st.session_state.is_builder_personel:
-                st.warning("Lütfen en az 1 personel ekleyin.")
+            elif personel_sayisi < 1:
+                st.warning("Lütfen en az 1 personel girin (tip ve sayı).")
             else:
+                personeller = expand_personnel_by_type(ib_pro_n, ib_pro_u, ib_stu_n, ib_stu_u)
                 if jt == "Tek Seferlik (Tarihli)":
                     dates = []
                     tr = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"]
@@ -671,10 +662,9 @@ with tabs[0]:
                     is_obj = Is(
                         musteri_id=c_map[sc], musteri_adi=sc, job_tag=tag, tarihler=dates,
                         musteri_tutari=tp, fiyat_modu=pm,
-                        personeller=list(st.session_state.is_builder_personel)
+                        personeller=personeller
                     )
                     st.session_state.draft_jobs.append(is_obj)
-                    st.session_state.is_builder_personel = []
                     st.success(f"'{sc}' işi sepete eklendi.")
                     st.rerun()
 
@@ -710,7 +700,11 @@ with tabs[0]:
                     mc1.metric("👥 Personel", is_obj.personel_sayisi, label_visibility="visible")
                     mc2.metric("📅 Ziyaret", is_obj.ziyaret_sayisi)
                     mc3.metric("💹 Net Kâr", f"{is_obj.net_kar:,.0f} ₺")
-                    st.caption(f"Gelir: {is_obj.toplam_musteri_geliri:,.0f} ₺  ·  Personel Maliyeti: {is_obj.toplam_personel_maliyeti:,.0f} ₺")
+                    st.caption(
+                        f"Gelir: {is_obj.toplam_musteri_geliri:,.0f} ₺  ·  "
+                        f"Personel: {personel_listesi_ozet(is_obj.personeller)}  ·  "
+                        f"Maliyet: {is_obj.toplam_personel_maliyeti:,.0f} ₺"
+                    )
                     if st.button("🗑️ Sepetten Sil", key=f"del_draft_{i}", use_container_width=True):
                         st.session_state.draft_jobs.pop(i)
                         st.rerun()
@@ -748,15 +742,23 @@ with tabs[1]:
     
     with cc:
         day_map = {}
-        for j in month_jobs:
+        for group in group_jobs_by_visit(month_jobs):
+            j = visit_group_label(group)
             d = j['date']
-            if d not in day_map: day_map[d]={'jobs':{}, 'net':0, 'toplam_kisi':0}
-            day_map[d]['net'] += (float(j['price_customer'] or 0) - float(j['price_worker'] or 0))
-            day_map[d]['toplam_kisi'] += 1
+            if d not in day_map:
+                day_map[d] = {'jobs': {}, 'net': 0, 'toplam_kisi': 0}
+            visit_net = sum(
+                float(r['price_customer'] or 0) - float(r['price_worker'] or 0) for r in group
+            )
+            day_map[d]['net'] += visit_net
+            day_map[d]['toplam_kisi'] += len(group)
             cust_display = f"{j['name']}{get_sub_label(j)}"
-            if cust_display not in day_map[d]['jobs']: day_map[d]['jobs'][cust_display] = {'price':0.0, 'tag':j.get('job_tag', 'one_time'), 'kisi_sayisi':0}
-            day_map[d]['jobs'][cust_display]['price'] += float(j['price_customer'] or 0)
-            day_map[d]['jobs'][cust_display]['kisi_sayisi'] += 1
+            if cust_display not in day_map[d]['jobs']:
+                day_map[d]['jobs'][cust_display] = {
+                    'price': 0.0, 'tag': j.get('job_tag', 'one_time'), 'kisi_sayisi': 0,
+                }
+            day_map[d]['jobs'][cust_display]['price'] += float(j.get('price_customer') or 0)
+            day_map[d]['jobs'][cust_display]['kisi_sayisi'] += len(group)
         
         cal = calendar.monthcalendar(sy, sm)
         cols = st.columns(7)
@@ -780,105 +782,188 @@ with tabs[1]:
         sd = st.session_state.sel_date
         st.markdown(f"### 📅 {sd} İşleri")
         djs = [j for j in month_jobs if j['date'] == sd]
+        visit_groups = group_jobs_by_visit(djs)
 
-        if djs:
-            st.caption(f"👥 Bugün gereken toplam personel: **{len(djs)} kişi**")
+        if visit_groups:
+            st.caption(f"📍 **{len(visit_groups)}** ziyaret · 👥 **{len(djs)}** personel")
 
-        if not djs: 
+        if not visit_groups:
             st.info("Bu tarihte planlanmış iş yok.")
         else:
-            for i, j in enumerate(djs):
-                ico = "🎓" if j['job_type']=='student' else "👔"
+            for gi, group in enumerate(visit_groups):
+                j = visit_group_label(group)
+                counts, ucret, names, phones = summarize_personnel(group)
+                badge = format_personnel_badge(counts, ucret)
                 curr_tag = j.get('job_tag', 'one_time')
-                tag_icon = "🔄" if curr_tag=='subscription' else "🔹"
+                tag_icon = "🔄" if curr_tag == 'subscription' else "🔹"
                 sub_label = get_sub_label(j)
+                gid = j.get('group_id')
+                old_date = j.get('date') or ''
+                gkey = gid or j.get('id', gi)
 
-                with st.expander(f"{ico} {j['name']}{sub_label} {tag_icon}"):
-                    if curr_tag == 'subscription' and j.get('group_id'):
-                        if st.button("🔙 Tarihten Kaldır (Kotaya Geri Al)", key=f"back_{j['id']}_{i}"):
-                            add_to_queue("Kotaya Geri Al", "UPDATE jobs SET date='' WHERE group_id=%s", (j['group_id'],))
-                            j['date'] = '' 
+                with st.expander(f"{tag_icon} {j['name']}{sub_label} · 👷 {badge}"):
+                    if curr_tag == 'subscription' and gid:
+                        if st.button("🔙 Tarihten Kaldır (Kotaya Geri Al)", key=f"back_{gkey}_{gi}"):
+                            add_to_queue("Kotaya Geri Al", "UPDATE jobs SET date='' WHERE group_id=%s", (gid,))
+                            for r in group:
+                                r['date'] = ''
                             st.rerun()
 
-                    nt = st.selectbox("Etiket", ["Tek Sefer", "Abonelik"], index=0 if curr_tag=='one_time' else 1, key=f"t_{j['id']}_{i}")
-                    nv = 'subscription' if nt=="Abonelik" else 'one_time'
-                    if nv != curr_tag:
-                        add_to_queue(f"Etiket: {j['id']}", "UPDATE jobs SET job_tag=%s WHERE id=%s", (nv, j['id']))
-                        j['job_tag'] = nv
+                    nt = st.selectbox(
+                        "Etiket", ["Tek Sefer", "Abonelik"],
+                        index=0 if curr_tag == 'one_time' else 1, key=f"t_{gkey}_{gi}",
+                    )
+                    nv = 'subscription' if nt == "Abonelik" else 'one_time'
+                    if nv != curr_tag and gid:
+                        add_to_queue(
+                            f"Etiket: {j['name']}",
+                            "UPDATE jobs SET job_tag=%s WHERE group_id=%s AND COALESCE(date, '')=%s",
+                            (nv, gid, old_date),
+                        )
+                        for r in group:
+                            r['job_tag'] = nv
                         st.rerun()
-                    
+
                     st.divider()
-                    
-                    col_al, col_ver = st.columns(2)
-                    new_pc = col_al.number_input("Müşteri Tutarı (₺)", value=float(j['price_customer'] or 0), step=50.0, key=f"pc_{j['id']}_{i}")
-                    new_pw = col_ver.number_input("Personel Ücreti (₺)", value=float(j['price_worker'] or 0), step=50.0, key=f"pw_{j['id']}_{i}")
-                    
-                    new_jt = st.selectbox("Personel Türü", ["Öğrenci", "Profesyonel"], index=0 if j['job_type']=='student' else 1, key=f"jt_{j['id']}_{i}")
-                    new_jt_val = 'student' if new_jt == "Öğrenci" else 'pro'
-                    
-                    if new_pc != float(j['price_customer'] or 0) or new_pw != float(j['price_worker'] or 0) or new_jt_val != j['job_type']:
-                        if st.button("💾 Değişiklikleri Kuyruğa Ekle", key=f"upd_btn_{j['id']}_{i}", type="secondary"):
-                            if new_jt_val != j['job_type']:
-                                add_to_queue(f"Güncelleme: {j['name']}", "UPDATE jobs SET price_customer=%s, price_worker=%s, job_type=%s, assigned_student_id=NULL, assigned_pro_id=NULL WHERE id=%s", (new_pc, new_pw, new_jt_val, j['id']))
-                                j['assigned_student_id'] = None
-                                j['assigned_pro_id'] = None
+                    new_pc = st.number_input(
+                        "Müşteri Tutarı (₺)", value=float(j.get('price_customer') or 0),
+                        step=50.0, key=f"pc_{gkey}_{gi}",
+                    )
+
+                    st.markdown("**Personel (tip ve sayı)**")
+                    gc1, gc2 = st.columns(2)
+                    g_pro_n = gc1.number_input(
+                        "Profesyonel", min_value=0, max_value=20,
+                        value=int(counts['pro']), key=f"gpn_{gkey}_{gi}",
+                    )
+                    g_stu_n = gc2.number_input(
+                        "Öğrenci", min_value=0, max_value=20,
+                        value=int(counts['student']), key=f"gsn_{gkey}_{gi}",
+                    )
+                    gc3, gc4 = st.columns(2)
+                    g_pro_u = gc3.number_input(
+                        "Prof. yevmiye (₺)", min_value=0.0, step=50.0,
+                        value=float(ucret['pro']), key=f"gpu_{gkey}_{gi}",
+                    )
+                    g_stu_u = gc4.number_input(
+                        "Öğrenci yevmiye (₺)", min_value=0.0, step=50.0,
+                        value=float(ucret['student']), key=f"gsu_{gkey}_{gi}",
+                    )
+
+                    counts_differ = (
+                        new_pc != float(j.get('price_customer') or 0)
+                        or int(g_pro_n) != counts['pro']
+                        or int(g_stu_n) != counts['student']
+                        or float(g_pro_u) != float(ucret['pro'])
+                        or float(g_stu_u) != float(ucret['student'])
+                    )
+                    if int(g_pro_n) + int(g_stu_n) < 1:
+                        st.warning("En az 1 personel olmalı.")
+                    elif counts_differ:
+                        if st.button("💾 Grubu Güncelle", key=f"grp_upd_{gkey}_{gi}", type="secondary"):
+                            existing = {"pro": names["pro"], "student": names["student"], "phones": phones}
+                            personeller = expand_personnel_by_type(
+                                g_pro_n, g_pro_u, g_stu_n, g_stu_u, existing,
+                            )
+                            new_rows = build_visit_db_rows(
+                                gid, old_date, j['customer_id'], curr_tag, float(new_pc), personeller,
+                            )
+                            add_to_queue(
+                                "Grup sil (yeniden oluştur)",
+                                "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
+                                (gid, old_date),
+                            )
+                            add_to_queue(
+                                f"Grup güncelle: {j['name']}",
+                                JOB_INSERT_SQL, new_rows, is_bulk=True,
+                            )
+                            for r in list(group):
+                                if r in jobs_list:
+                                    jobs_list.remove(r)
+                            for row in new_rows:
+                                _gid, ds, cid, jtype, wp, cut, tag, prepaid, *_rest = row
+                                jobs_list.append({
+                                    'id': f"tmp_{uuid.uuid4().hex[:8]}", 'group_id': _gid, 'date': ds,
+                                    'customer_id': cid, 'job_type': jtype, 'price_worker': wp,
+                                    'price_customer': cut, 'job_tag': tag, 'is_prepaid': prepaid,
+                                    'name': j['name'], 'is_collected': 0, 'is_worker_paid': 0,
+                                    'assigned_student_id': None, 'assigned_pro_id': None,
+                                })
+                            st.rerun()
+
+                    st.divider()
+                    st.markdown("**Personel atamaları**")
+                    for ri, row in enumerate(group):
+                        ico = "🎓" if row['job_type'] == 'student' else "👔"
+                        slot_name = row.get('staff_name') or f"{ico} #{ri + 1}"
+                        aname = "❓"
+                        if row.get('assigned_student_id'):
+                            found = [s['name'] for s in db.get('students', []) if s['id'] == row['assigned_student_id']]
+                            if found:
+                                aname = found[0]
+                        elif row.get('assigned_pro_id'):
+                            found = [p['name'] for p in db.get('pros', []) if p['id'] == row['assigned_pro_id']]
+                            if found:
+                                aname = found[0]
+                        st.caption(f"**{slot_name}** → Atanan: {aname}")
+
+                        with st.popover(f"🎯 Ata: {slot_name}"):
+                            ready_ids = [
+                                int(a['person_id']) for a in db.get('availability', [])
+                                if a['date'] == sd and a['status'] == 'available'
+                            ]
+                            if row['job_type'] == 'student':
+                                musait = [s for s in db.get('students', []) if s['id'] in ready_ids] or db.get('students', [])
+                                sl = {s['name']: s['id'] for s in musait}
+                                sel = st.selectbox("Öğrenci", list(sl.keys()), key=f"s_{row['id']}_{gi}_{ri}")
+                                if st.button("Ata", key=f"ba_{row['id']}_{gi}_{ri}"):
+                                    add_to_queue(
+                                        f"Atama: {sel}",
+                                        "UPDATE jobs SET assigned_student_id=%s WHERE id=%s",
+                                        (sl[sel], row['id']),
+                                    )
+                                    st.rerun()
                             else:
-                                add_to_queue(f"Güncelleme: {j['name']}", "UPDATE jobs SET price_customer=%s, price_worker=%s, job_type=%s WHERE id=%s", (new_pc, new_pw, new_jt_val, j['id']))
-                            
-                            j['price_customer'] = new_pc
-                            j['price_worker'] = new_pw
-                            j['job_type'] = new_jt_val
-                            st.rerun()
-                    st.divider()
-                    
-                    aname = "❓"
-                    if j['assigned_student_id']:
-                        found = [s['name'] for s in db.get('students',[]) if s['id']==j['assigned_student_id']]
-                        if found: aname = found[0]
-                    elif j['assigned_pro_id']:
-                        found = [p['name'] for p in db.get('pros',[]) if p['id']==j['assigned_pro_id']]
-                        if found: aname = found[0]
-                    st.info(f"Atanan: {aname}")
+                                musait = [p for p in db.get('pros', []) if p['id'] in ready_ids] or db.get('pros', [])
+                                pl = {p['name']: p['id'] for p in musait}
+                                sel = st.selectbox("Profesyonel", list(pl.keys()), key=f"p_{row['id']}_{gi}_{ri}")
+                                if st.button("Ata", key=f"bp_{row['id']}_{gi}_{ri}"):
+                                    add_to_queue(
+                                        f"Atama: {sel}",
+                                        "UPDATE jobs SET assigned_pro_id=%s WHERE id=%s",
+                                        (pl[sel], row['id']),
+                                    )
+                                    st.rerun()
 
-                    new_job_note = st.text_input("İşe Özel Not (ör. anahtar konumu)", value=j.get('job_note') or '', key=f"jnote_{j['id']}_{i}")
-                    if new_job_note != (j.get('job_note') or ''):
-                        if st.button("📝 Notu Kaydet", key=f"jnote_btn_{j['id']}_{i}"):
-                            add_to_queue(f"İş Notu: {j['name']}", "UPDATE jobs SET job_note=%s WHERE id=%s", (new_job_note, j['id']))
-                            j['job_note'] = new_job_note
+                    new_job_note = st.text_input(
+                        "İşe Özel Not", value=j.get('job_note') or '', key=f"jnote_{gkey}_{gi}",
+                    )
+                    if new_job_note != (j.get('job_note') or '') and gid:
+                        if st.button("📝 Notu Kaydet", key=f"jnote_btn_{gkey}_{gi}"):
+                            add_to_queue(
+                                f"İş Notu: {j['name']}",
+                                "UPDATE jobs SET job_note=%s WHERE group_id=%s AND COALESCE(date, '')=%s",
+                                (new_job_note, gid, old_date),
+                            )
+                            for r in group:
+                                r['job_note'] = new_job_note
                             st.rerun()
-                    
-                    with st.popover("🎯 Personel Ata (Yalnızca Müsait Olanlar)"):
-                        ready_ids = [int(a['person_id']) for a in db.get('availability', []) if a['date'] == sd and a['status'] == 'available']
-                        
-                        if j['job_type'] == 'student':
-                            musaıt_ogrencıler = [s for s in db.get('students', []) if s['id'] in ready_ids]
-                            if not musaıt_ogrencıler:
-                                st.warning("⚠️ Bugün için müsait öğrenci yok! (Puantajdan ekleyin)")
-                                musaıt_ogrencıler = db.get('students', [])
-                            
-                            sl = {s['name']: s['id'] for s in musaıt_ogrencıler}
-                            sel = st.selectbox("Müsait Öğrenci Seç", list(sl.keys()), key=f"s_{j['id']}_{i}")
-                            if st.button("Öğrenciyi Ata", key=f"ba_{j['id']}_{i}"):
-                                add_to_queue(f"Atama: {sel}", "UPDATE jobs SET assigned_student_id=%s WHERE id=%s", (sl[sel], j['id']))
-                                st.rerun()
-                        else:
-                            musaıt_prolar = [p for p in db.get('pros', []) if p['id'] in ready_ids]
-                            if not musaıt_prolar:
-                                st.warning("⚠️ Bugün için müsait profesyonel yok! (Puantajdan ekleyin)")
-                                musaıt_prolar = db.get('pros', [])
-                                
-                            pl = {p['name']: p['id'] for p in musaıt_prolar}
-                            sel = st.selectbox("Müsait Profesyonel Seç", list(pl.keys()), key=f"p_{j['id']}_{i}")
-                            if st.button("Profesyoneli Ata", key=f"bp_{j['id']}_{i}"):
-                                add_to_queue(f"Atama: {sel}", "UPDATE jobs SET assigned_pro_id=%s WHERE id=%s", (pl[sel], j['id']))
-                                st.rerun()
 
-                    if st.button("🗑️ Tamamen Sil", key=f"del_{j['id']}_{i}"):
-                        if j.get('group_id') and curr_tag == 'subscription':
-                            add_to_queue("Silme", "DELETE FROM jobs WHERE group_id=%s", (j['group_id'],))
+                    if st.button("🗑️ Ziyareti Sil", key=f"del_{gkey}_{gi}"):
+                        if gid and curr_tag == 'subscription':
+                            add_to_queue("Silme", "DELETE FROM jobs WHERE group_id=%s", (gid,))
+                        elif gid:
+                            add_to_queue(
+                                "Silme",
+                                "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
+                                (gid, old_date),
+                            )
                         else:
-                            add_to_queue("Silme", "DELETE FROM jobs WHERE id=%s", (j['id'],))
-                        jobs_list.remove(j)
+                            for row in group:
+                                add_to_queue("Silme", "DELETE FROM jobs WHERE id=%s", (row['id'],))
+                        for r in list(group):
+                            if r in jobs_list:
+                                jobs_list.remove(r)
                         st.rerun()
 
         st.divider()

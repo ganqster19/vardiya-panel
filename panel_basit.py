@@ -14,6 +14,8 @@ from psycopg2.extras import execute_values
 from panel_db import (
     get_db_connection, load_panel_data, JOB_INSERT_SQL,
     job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date,
+    group_jobs_by_visit, summarize_personnel, format_personnel_badge, format_personnel_html,
+    personel_listesi_ozet, expand_personnel_by_type, build_visit_db_rows, visit_group_label,
 )
 from panel_auth import require_auth
 
@@ -186,8 +188,6 @@ st.markdown("""
 
 if "draft_jobs" not in st.session_state:
     st.session_state.draft_jobs = []
-if "is_builder_personel" not in st.session_state:
-    st.session_state.is_builder_personel = []
 if "pending_actions" not in st.session_state:
     st.session_state.pending_actions = []
 if "sel_date" not in st.session_state:
@@ -245,9 +245,6 @@ def commit_queue():
         conn.close()
 
 
-def staff_map(personnel):
-    return {f"{p['name']} ({p.get('phone') or '—'})": p for p in personnel}
-
 
 def tel_link(num):
     if not num or not str(num).strip():
@@ -269,15 +266,16 @@ def maps_link(url):
     return u
 
 
-def render_job_card(j, sub_label=""):
+def render_visit_card(group, sub_label=""):
+    j = visit_group_label(group)
     musteri = j.get("name") or "Müşteri"
-    staff = j.get("staff_name") or "Personel atanmadı"
-    staff_tel = j.get("staff_phone") or ""
+    counts, ucret, names, phones = summarize_personnel(group)
+    personel_line = format_personnel_html(counts, ucret, names, phones)
     contact = job_musteri_telefon(j)
     loc = maps_link(job_musteri_konum(j))
     tag = "🔄" if j.get("job_tag") == "subscription" else "🔹"
     meta_lines = [
-        f"👷 <b>{staff}</b>" + (f" · {staff_tel}" if staff_tel else ""),
+        f"👷 {personel_line}",
         f"📞 Müşteri: <b>{contact or '—'}</b>",
     ]
     if loc:
@@ -291,26 +289,30 @@ def render_job_card(j, sub_label=""):
     )
 
 
-def render_job_edit_form(j, i, customers):
-    """Mobilde iş eklerken girilen tüm alanları düzenleme formu."""
-    jid = j.get("id", i)
+def render_visit_edit_form(group, i, customers):
+    """Aynı ziyarete ait tüm personel satırlarını tip/sayı ile düzenle."""
+    j = visit_group_label(group)
+    gid = j.get("group_id")
+    old_date = j.get("date") or ""
+    jid = gid or j.get("id", i)
+    counts, ucret, names, phones = summarize_personnel(group)
+    existing = {"pro": names["pro"], "student": names["student"], "phones": phones}
+
     if not customers:
         st.caption("Müşteri listesi boş — önce 👤 Müşteri sekmesinden ekleyin.")
         return
     c_map = {c["name"]: c["id"] for c in customers}
-    names = list(c_map.keys())
+    names_list = list(c_map.keys())
     cur_name = j.get("name") or ""
-    cust_idx = names.index(cur_name) if cur_name in names else 0
+    cust_idx = names_list.index(cur_name) if cur_name in names_list else 0
 
-    tip_labels = {"pro": "Profesyonel", "student": "Öğrenci"}
-    tip_rev = {v: k for k, v in tip_labels.items()}
-    cur_jtype = j.get("job_type") or "pro"
-    cur_tip = tip_labels.get(cur_jtype, "Profesyonel")
+    tag_opts = ["Tek seferlik", "Abonelik (kota)"]
+    cur_tag_i = 1 if j.get("job_tag") == "subscription" else 0
 
     with st.expander("✏️ İşi düzenle"):
         st.caption("Telefon ve konum müşteri profilinden gelir → **👤 Müşteri** sekmesi.")
 
-        em = st.selectbox("Müşteri", names, index=cust_idx, key=f"ed_cust_{jid}_{i}")
+        em = st.selectbox("Müşteri", names_list, index=cust_idx, key=f"ed_cust_{jid}_{i}")
         ed = st.date_input(
             "Tarih",
             value=parse_tr_date(j.get("date")),
@@ -318,11 +320,7 @@ def render_job_edit_form(j, i, customers):
             format="DD.MM.YYYY",
             key=f"ed_date_{jid}_{i}",
         )
-
-        tag_opts = ["Tek seferlik", "Abonelik (kota)"]
-        cur_tag_i = 1 if j.get("job_tag") == "subscription" else 0
         etag = st.radio("İş tipi", tag_opts, index=cur_tag_i, horizontal=True, key=f"ed_tag_{jid}_{i}")
-
         epc = st.number_input(
             "Müşteri tutarı (₺)",
             min_value=0.0,
@@ -331,49 +329,66 @@ def render_job_edit_form(j, i, customers):
             key=f"ed_pc_{jid}_{i}",
         )
 
-        st.markdown("**Personel**")
-        esn = st.text_input("Personel adı", value=j.get("staff_name") or "", key=f"ed_s_{jid}_{i}")
-        esp = st.text_input("Personel tel.", value=j.get("staff_phone") or "", key=f"ed_p_{jid}_{i}")
-        etip = st.selectbox(
-            "Personel tipi",
-            list(tip_labels.values()),
-            index=list(tip_labels.values()).index(cur_tip) if cur_tip in tip_labels.values() else 0,
-            key=f"ed_jt_{jid}_{i}",
+        st.markdown("**Personel (tip ve sayı)**")
+        pc1, pc2 = st.columns(2)
+        e_pro_n = pc1.number_input(
+            "Profesyonel sayısı", min_value=0, max_value=20,
+            value=int(counts["pro"]), key=f"ed_pro_n_{jid}_{i}",
         )
-        epw = st.number_input(
-            "Yevmiye (₺)",
-            min_value=0.0,
-            step=50.0,
-            value=float(j.get("price_worker") or 0),
-            key=f"ed_pw_{jid}_{i}",
+        e_stu_n = pc2.number_input(
+            "Öğrenci sayısı", min_value=0, max_value=20,
+            value=int(counts["student"]), key=f"ed_stu_n_{jid}_{i}",
+        )
+        pc3, pc4 = st.columns(2)
+        e_pro_u = pc3.number_input(
+            "Prof. yevmiye (₺)", min_value=0.0, step=50.0,
+            value=float(ucret["pro"]), key=f"ed_pro_u_{jid}_{i}",
+        )
+        e_stu_u = pc4.number_input(
+            "Öğrenci yevmiye (₺)", min_value=0.0, step=50.0,
+            value=float(ucret["student"]), key=f"ed_stu_u_{jid}_{i}",
         )
 
         if st.button("Güncelle", key=f"ed_btn_{jid}_{i}", type="primary", use_container_width=True):
-            if not esn.strip():
-                st.warning("Personel adı girin.")
+            if int(e_pro_n) + int(e_stu_n) < 1:
+                st.warning("En az 1 personel girin.")
             else:
                 new_cid = c_map[em]
                 new_ds = format_tr_date(ed)
                 new_tag = "subscription" if "Abonelik" in etag else "one_time"
-                new_jtype = tip_rev[etip]
-                prepaid = 1 if float(epc) > 0 else 0
-
+                personeller = expand_personnel_by_type(
+                    e_pro_n, e_pro_u, e_stu_n, e_stu_u, existing,
+                )
+                new_rows = build_visit_db_rows(
+                    gid, new_ds, new_cid, new_tag, float(epc), personeller,
+                )
                 add_to_queue(
                     f"İş güncelle: {em}",
-                    """UPDATE jobs SET date=%s, customer_id=%s, job_tag=%s,
-                       price_customer=%s, price_worker=%s, job_type=%s,
-                       staff_name=%s, staff_phone=%s, is_prepaid=%s
-                       WHERE id=%s""",
-                    (
-                        new_ds, new_cid, new_tag, float(epc), float(epw), new_jtype,
-                        esn.strip(), esp.strip(), prepaid, jid,
-                    ),
+                    "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
+                    (gid, old_date),
                 )
-                j.update(
-                    date=new_ds, customer_id=new_cid, name=em, job_tag=new_tag,
-                    price_customer=float(epc), price_worker=float(epw), job_type=new_jtype,
-                    staff_name=esn.strip(), staff_phone=esp.strip(), is_prepaid=prepaid,
+                add_to_queue(
+                    f"İş yeniden oluştur: {em}",
+                    JOB_INSERT_SQL,
+                    new_rows,
+                    is_bulk=True,
                 )
+                for r in list(group):
+                    if r in jobs_list:
+                        jobs_list.remove(r)
+                profil = next((c for c in customers if c["id"] == new_cid), {})
+                for row in new_rows:
+                    _gid, ds, cid, jtype, wp, cut, tag, prepaid, _cph, _loc, sname, sph = row
+                    jobs_list.append({
+                        "id": f"tmp_{uuid.uuid4().hex[:8]}", "group_id": _gid, "date": ds,
+                        "customer_id": cid, "job_type": jtype, "price_worker": wp,
+                        "price_customer": cut, "job_tag": tag, "is_prepaid": prepaid,
+                        "staff_name": sname, "staff_phone": sph,
+                        "name": em,
+                        "customer_phone": profil.get("phone"),
+                        "customer_location": profil.get("location"),
+                        "is_collected": 0, "is_worker_paid": 0,
+                    })
                 st.rerun()
 
 
@@ -469,7 +484,6 @@ with tab_ekle:
     custs = db.get("customers", [])
     c_map = {c["name"]: c["id"] for c in custs}
     cust_by_id = {c["id"]: c for c in custs}
-    smap = staff_map(personnel)
 
     sc = st.selectbox("Müşteri", ["— Seçin —"] + list(c_map.keys()), key="basit_musteri")
 
@@ -491,43 +505,24 @@ with tab_ekle:
     tp = st.number_input("Müşteri tutarı (₺)", 0.0, step=500.0, key="basit_tp")
     pm = st.radio("Tutar türü", ["Günlük", "Toplam"], horizontal=True, key="basit_pm")
 
-    st.markdown("**Gidecek personel**")
-    if not personnel:
-        st.warning("Önce **👷 Personel** sekmesinden personel ekleyin.")
-    staff_sel = st.selectbox(
-        "Personel seç",
-        ["— Seçin —"] + list(smap.keys()) if personnel else ["— Seçin —"],
-        key="basit_staff_pick",
-    )
-    yeni_tip = st.selectbox("Kayıt tipi", ["Profesyonel", "Öğrenci"], key="basit_yenitip")
-    yeni_ucret = st.number_input("Yevmiye (₺)", 0.0, step=50.0, key="basit_yeniucret")
-    if st.button("➕ Personeli işe ekle", use_container_width=True, key="basit_personel_ekle"):
-        if staff_sel == "— Seçin —":
-            st.warning("Personel seçin.")
-        else:
-            sp = smap[staff_sel]
-            st.session_state.is_builder_personel.append({
-                "tip": "pro" if yeni_tip == "Profesyonel" else "student",
-                "ucret": yeni_ucret,
-                "name": sp["name"],
-                "phone": sp.get("phone") or "",
-                "staff_id": sp["id"],
-            })
-            st.rerun()
-
-    for idx, p in enumerate(st.session_state.is_builder_personel):
-        c_a, c_b = st.columns([4, 1])
-        c_a.markdown(f"👷 **{p.get('name', '?')}** · {p.get('phone', '—')} · {p['ucret']:,.0f} ₺")
-        if c_b.button("🗑️", key=f"basit_rm_p_{idx}"):
-            st.session_state.is_builder_personel.pop(idx)
-            st.rerun()
+    st.markdown("**Gidecek personel (tip ve sayı)**")
+    pc1, pc2 = st.columns(2)
+    pro_sayi = pc1.number_input("Profesyonel sayısı", min_value=0, max_value=20, value=1, key="basit_pro_n")
+    ogrenci_sayi = pc2.number_input("Öğrenci sayısı", min_value=0, max_value=20, value=0, key="basit_stu_n")
+    pc3, pc4 = st.columns(2)
+    pro_ucret = pc3.number_input("Prof. yevmiye (₺)", min_value=0.0, step=50.0, key="basit_pro_u")
+    ogrenci_ucret = pc4.number_input("Öğrenci yevmiye (₺)", min_value=0.0, step=50.0, key="basit_stu_u")
+    st.caption("Örn: 2 Profesyonel + 1 Öğrenci — aynı ziyarette gruplanır.")
 
     if st.button("✅ Sepete ekle", type="primary", use_container_width=True):
         if sc == "— Seçin —":
             st.warning("Müşteri seçin.")
-        elif not st.session_state.is_builder_personel:
-            st.warning("En az 1 personel ekleyin.")
+        elif int(pro_sayi) + int(ogrenci_sayi) < 1:
+            st.warning("En az 1 personel girin (tip ve sayı).")
         else:
+            personeller = expand_personnel_by_type(
+                pro_sayi, pro_ucret, ogrenci_sayi, ogrenci_ucret,
+            )
             if jt == "Tek seferlik":
                 tr = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
                 dates, curr = [], d1
@@ -546,9 +541,8 @@ with tab_ekle:
                 st.session_state.draft_jobs.append(Is(
                     musteri_id=c_map[sc], musteri_adi=sc, job_tag=tag, tarihler=dates,
                     musteri_tutari=tp, fiyat_modu=pm,
-                    personeller=list(st.session_state.is_builder_personel),
+                    personeller=personeller,
                 ))
-                st.session_state.is_builder_personel = []
                 st.success("Sepete eklendi.")
                 st.rerun()
 
@@ -559,12 +553,12 @@ with tab_ekle:
     else:
         for i, is_obj in enumerate(st.session_state.draft_jobs):
             tip = "🔄 Abonelik" if is_obj.job_tag == "subscription" else "🔹 Tek sefer"
-            names = ", ".join(p.get("name", "?") for p in is_obj.personeller)
+            p_ozet = personel_listesi_ozet(is_obj.personeller)
             profil = cust_by_id.get(is_obj.musteri_id, {})
             tel = profil.get("phone") or "—"
             st.info(
                 f"**{is_obj.musteri_adi}** — {tip}\n"
-                f"{is_obj.ziyaret_sayisi} gün/kota · 👷 {names}\n"
+                f"{is_obj.ziyaret_sayisi} gün/kota · 👷 {p_ozet}\n"
                 f"📞 {tel} (müşteri profili)"
             )
             if st.button("Sepetten kaldır", key=f"basit_draft_del_{i}", use_container_width=True):
@@ -624,13 +618,14 @@ with tab_takvim:
         return ""
 
     day_map = {}
-    for j in month_jobs:
+    for group in group_jobs_by_visit(month_jobs):
+        j = visit_group_label(group)
         d = j["date"]
         day_map.setdefault(d, {"jobs": {}, "kisi": 0})
-        day_map[d]["kisi"] += 1
+        day_map[d]["kisi"] += len(group)
         label = f"{j['name']}{get_sub_label(j)}"
         day_map[d]["jobs"].setdefault(label, {"tag": j.get("job_tag", "one_time"), "kisi": 0})
-        day_map[d]["jobs"][label]["kisi"] += 1
+        day_map[d]["jobs"][label]["kisi"] += len(group)
 
     sd = st.session_state.sel_date
     min_d = min_visible_date()
@@ -667,16 +662,18 @@ with tab_takvim:
     st.markdown(f'<div class="day-header">📅 {sd}</div>', unsafe_allow_html=True)
 
     djs = [j for j in jobs_list if j.get("date") == sd]
-    djs.sort(key=lambda x: (x.get("staff_name") or "zzz", x.get("name") or ""))
+    visit_groups = group_jobs_by_visit(djs)
+    visit_groups.sort(key=lambda g: (visit_group_label(g).get("name") or "", visit_group_label(g).get("group_id") or ""))
 
-    if not djs:
+    if not visit_groups:
         st.info("Bu gün için planlanmış iş yok.")
     else:
-        st.caption(f"{len(djs)} ziyaret")
-        for i, j in enumerate(djs):
-            jid = j.get("id", i)
+        st.caption(f"{len(visit_groups)} ziyaret · {len(djs)} personel")
+        for i, group in enumerate(visit_groups):
+            j = visit_group_label(group)
+            jid = j.get("group_id") or j.get("id", i)
             sub = get_sub_label(j)
-            render_job_card(j, sub)
+            render_visit_card(group, sub)
 
             act1, act2, act3 = st.columns(3)
             contact = job_musteri_telefon(j)
@@ -688,14 +685,25 @@ with tab_takvim:
                 render_action_link("🗺️ Harita", loc, new_tab=True)
             with act3:
                 if st.button("🗑️", key=f"basit_del_{jid}_{i}", use_container_width=True, help="Sil"):
-                    if j.get("group_id") and j.get("job_tag") == "subscription":
-                        add_to_queue("Silme", "DELETE FROM jobs WHERE group_id=%s", (j["group_id"],))
+                    gid = j.get("group_id")
+                    old_date = j.get("date") or ""
+                    if gid and j.get("job_tag") == "subscription":
+                        add_to_queue("Silme", "DELETE FROM jobs WHERE group_id=%s", (gid,))
+                    elif gid:
+                        add_to_queue(
+                            "Silme",
+                            "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
+                            (gid, old_date),
+                        )
                     else:
-                        add_to_queue("Silme", "DELETE FROM jobs WHERE id=%s", (j["id"],))
-                    jobs_list.remove(j)
+                        for r in group:
+                            add_to_queue("Silme", "DELETE FROM jobs WHERE id=%s", (r["id"],))
+                    for r in list(group):
+                        if r in jobs_list:
+                            jobs_list.remove(r)
                     st.rerun()
 
-            render_job_edit_form(j, i, custs_edit)
+            render_visit_edit_form(group, i, custs_edit)
             st.divider()
 
     # --- Alt: ay takvimi & bekleyen kotalar ---
@@ -811,7 +819,7 @@ with tab_musteri:
 
 # ========== PERSONEL ==========
 with tab_personel:
-    st.caption("Servis ekibine gidecek personeller. İş eklerken buradan seçilir.")
+    st.caption("Servis ekibi referans listesi. İş eklerken personel tipi ve sayısı girilir.")
     with st.form("basit_personel_form"):
         pad = st.text_input("Ad Soyad", placeholder="Örn. Ahmet Yılmaz")
         ptel = st.text_input("Telefon", placeholder="05xx xxx xx xx")

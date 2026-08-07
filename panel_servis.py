@@ -8,7 +8,11 @@ import streamlit as st
 import calendar
 from datetime import datetime, date
 
-from panel_db import load_panel_data, job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date
+from panel_db import (
+    load_panel_data, job_musteri_telefon, job_musteri_konum, render_action_link,
+    min_visible_date, group_jobs_by_visit, summarize_personnel, format_personnel_html,
+    visit_group_label,
+)
 from panel_auth import require_auth
 
 st.set_page_config(
@@ -145,23 +149,24 @@ sel = st.session_state.servis_date
 st.markdown(f'<div class="day-header">📅 {sel}</div>', unsafe_allow_html=True)
 
 day_jobs = [j for j in jobs if j.get("date") == sel]
-day_jobs.sort(key=lambda x: (x.get("staff_name") or "zzz", x.get("name") or ""))
+visit_groups = group_jobs_by_visit(day_jobs)
+visit_groups.sort(key=lambda g: (visit_group_label(g).get("name") or "", visit_group_label(g).get("group_id") or ""))
 
-if not day_jobs:
+if not visit_groups:
     st.info("Bu gün için planlanmış iş yok.")
 else:
-    st.caption(f"{len(day_jobs)} ziyaret")
-    for idx, j in enumerate(day_jobs):
-        jid = j.get("id", idx)
+    st.caption(f"{len(visit_groups)} ziyaret · {len(day_jobs)} personel")
+    for idx, group in enumerate(visit_groups):
+        j = visit_group_label(group)
         musteri = j.get("name") or "Müşteri"
-        staff = j.get("staff_name") or "Personel atanmadı"
-        staff_tel = j.get("staff_phone") or ""
+        counts, ucret, names, phones = summarize_personnel(group)
+        personel_line = format_personnel_html(counts, ucret, names, phones)
         contact = job_musteri_telefon(j)
         loc = maps_link(job_musteri_konum(j))
         tag = "🔄" if j.get("job_tag") == "subscription" else "🔹"
 
         meta_lines = [
-            f"👷 <b>{staff}</b>" + (f" · {staff_tel}" if staff_tel else ""),
+            f"👷 {personel_line}",
             f"📞 Müşteri: <b>{contact or '—'}</b>",
         ]
         if loc:
