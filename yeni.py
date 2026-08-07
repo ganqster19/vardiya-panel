@@ -8,9 +8,11 @@ import os
 from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
 from _debug_perf import PerfTimer, perf_log
+from panel_auth import require_auth
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Vardiya (Offline & Hızlı)", page_icon="⚡", layout="wide")
+require_auth("admin")
 perf_log("yeni.py:startup", "script_rerun_start", {"rerun": True}, "C")
 
 # --- İŞ (JOB) SINIFI ---

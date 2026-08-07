@@ -8,7 +8,8 @@ import streamlit as st
 import calendar
 from datetime import datetime, date
 
-from panel_db import load_panel_data, job_musteri_telefon, job_musteri_konum, render_action_link
+from panel_db import load_panel_data, job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date
+from panel_auth import require_auth
 
 st.set_page_config(
     page_title="Servis Listesi",
@@ -16,6 +17,7 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
+require_auth("servis")
 
 st.markdown("""
 <style>
@@ -92,11 +94,15 @@ if "servis_date" not in st.session_state:
 
 
 def refresh():
-    st.session_state.servis_data = load_panel_data()
+    st.session_state.servis_data = load_panel_data(admin=False)
 
 
 if not st.session_state.servis_data:
     refresh()
+
+min_d = min_visible_date()
+if datetime.strptime(st.session_state.servis_date, "%d.%m.%Y").date() < min_d:
+    st.session_state.servis_date = min_d.strftime("%d.%m.%Y")
 
 now = datetime.now()
 db = st.session_state.servis_data
@@ -116,13 +122,17 @@ with c3:
 # Tarih seçimi
 col_d, col_m, col_y = st.columns(3)
 with col_d:
-    gun = st.date_input("Gün", datetime.strptime(st.session_state.servis_date, "%d.%m.%Y"), label_visibility="collapsed")
+    cur = datetime.strptime(st.session_state.servis_date, "%d.%m.%Y").date()
+    gun = st.date_input(
+        "Gün", max(cur, min_d), min_value=min_d, label_visibility="collapsed",
+    )
     st.session_state.servis_date = gun.strftime("%d.%m.%Y")
 with col_m:
     if st.button("◀ Dün", use_container_width=True):
         from datetime import timedelta
         d = datetime.strptime(st.session_state.servis_date, "%d.%m.%Y").date() - timedelta(days=1)
-        st.session_state.servis_date = d.strftime("%d.%m.%Y")
+        if d >= min_d:
+            st.session_state.servis_date = d.strftime("%d.%m.%Y")
         st.rerun()
 with col_y:
     if st.button("Yarın ▶", use_container_width=True):

@@ -11,7 +11,11 @@ from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
 from psycopg2.extras import execute_values
 
-from panel_db import get_db_connection, load_panel_data, JOB_INSERT_SQL, job_musteri_telefon, job_musteri_konum, render_action_link
+from panel_db import (
+    get_db_connection, load_panel_data, JOB_INSERT_SQL,
+    job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date,
+)
+from panel_auth import require_auth
 
 st.set_page_config(
     page_title="Vardiya Mobil",
@@ -19,6 +23,7 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
+require_auth("mobil")
 
 
 @dataclass
@@ -189,11 +194,14 @@ if "db_data" not in st.session_state:
 
 
 def refresh_data():
-    st.session_state.db_data = load_panel_data()
+    st.session_state.db_data = load_panel_data(admin=False)
 
 
 if not st.session_state.db_data:
     refresh_data()
+
+if parse_tr_date(st.session_state.sel_date) < min_visible_date():
+    st.session_state.sel_date = format_tr_date(min_visible_date())
 
 
 def add_to_queue(desc, query, params, is_bulk=False):
@@ -338,9 +346,10 @@ with tab_ekle:
     sc = st.selectbox("Müşteri", ["— Seçin —"] + list(c_map.keys()), key="basit_musteri")
 
     jt = st.radio("İş tipi", ["Tek seferlik", "Abonelik (kota)"], key="basit_tip")
+    min_d = min_visible_date()
     if jt == "Tek seferlik":
-        d1 = st.date_input("Başlangıç", datetime.now(), key="basit_d1")
-        d2 = st.date_input("Bitiş", datetime.now(), key="basit_d2")
+        d1 = st.date_input("Başlangıç", max(datetime.now().date(), min_d), min_value=min_d, key="basit_d1")
+        d2 = st.date_input("Bitiş", max(datetime.now().date(), min_d), min_value=min_d, key="basit_d2")
         days = st.multiselect(
             "Hangi günler?",
             ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"],
@@ -499,16 +508,19 @@ with tab_takvim:
 
     # --- Üst: tarih gezintisi (servis paneli gibi) ---
     nav1, nav2, nav3 = st.columns(3)
+    min_d = min_visible_date()
     with nav1:
         if st.button("◀ Dün", key="basit_dun", use_container_width=True):
             d = datetime.strptime(sd, "%d.%m.%Y").date() - timedelta(days=1)
-            st.session_state.sel_date = d.strftime("%d.%m.%Y")
-            sync_month_from_date(st.session_state.sel_date)
+            if d >= min_d:
+                st.session_state.sel_date = d.strftime("%d.%m.%Y")
+                sync_month_from_date(st.session_state.sel_date)
             st.rerun()
     with nav2:
         gun = st.date_input(
             "Gün",
-            datetime.strptime(sd, "%d.%m.%Y"),
+            max(parse_tr_date(sd), min_d),
+            min_value=min_d,
             key="basit_gun_picker",
             label_visibility="collapsed",
         )
@@ -728,7 +740,7 @@ with tab_gider:
     with st.form("basit_gider_form"):
         gisim = st.text_input("İsim", placeholder="Örn. Yakıt, Kira, Malzeme")
         gaciklama = st.text_input("Açıklama", placeholder="Detay (isteğe bağlı)")
-        gtarih = st.date_input("Tarih", date.today())
+        gtarih = st.date_input("Tarih", max(date.today(), min_visible_date()), min_value=min_visible_date())
         gtutar = st.number_input("Miktar (₺)", min_value=0.0, step=50.0)
         if st.form_submit_button("Kuyruğa ekle", type="primary", use_container_width=True):
             if not gisim.strip():
@@ -781,7 +793,10 @@ with tab_gider:
                         "Açıklama", value=(e.get("description") or "").strip(), key=f"g_a_{eid}_{i}",
                     )
                     ed_tarih = st.date_input(
-                        "Tarih", parse_tr_date(e.get("date")), key=f"g_d_{eid}_{i}",
+                        "Tarih",
+                        max(parse_tr_date(e.get("date")), min_visible_date()),
+                        min_value=min_visible_date(),
+                        key=f"g_d_{eid}_{i}",
                     )
                     ed_tutar = st.number_input(
                         "Miktar (₺)", min_value=0.0, step=50.0,

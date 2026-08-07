@@ -53,5 +53,25 @@ git push -u origin main
 ## Güvenlik
 
 - `secrets.toml` repoda olmamalı (`.gitignore`'da).
+- **[auth]** bölümünde her panel için ayrı şifre tanımlayın (`mobil_password`, `servis_password`, `admin_password`).
 - Supabase şifresini kimseyle paylaşmayın.
-- Servis paneli URL'sini sadece servis ekibiyle paylaşın.
+- GitHub reposunu **Private** yapın.
+
+### Veri görünürlüğü
+
+| Panel | Veri erişimi |
+|-------|----------------|
+| `yeni.py` (admin) | Tüm geçmiş |
+| `panel_basit.py` | Dün ve sonrası (+ tarihsiz bekleyen kotalar) |
+| `panel_servis.py` | Dün ve sonrası |
+
+Filtre veritabanı sorgusunda uygulanır; eski iş ve gider kayıtları mobil/servis panellerine **hiç gelmez**.
+
+### Kaynak kod
+
+Streamlit uygulamalarında Python kaynağı tamamen gizlenemez. Koruma katmanları:
+- Private GitHub repo
+- Panel şifreleri (`panel_auth.py`)
+- Supabase credentials sadece Streamlit Secrets'ta
+
+Tam koruma için ileride API + ince istemci mimarisi gerekir.
