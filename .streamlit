@@ -1,0 +1,30 @@
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+
+# Streamlit Cloud → Settings → Secrets bölümüne bu yapıyı yapıştırın.
+# Lokal test için: bu dosyayı kopyalayıp secrets.toml yapın ve değerleri doldurun.
+
+[supabase]
+host = "db.PROJE_ID.supabase.co"
+user = "postgres"
+pooler_host = "aws-1-eu-central-1.pooler.supabase.com"
+pooler_user = "postgres.PROJE_ID"
+port = 5432
+dbname = "postgres"
+password = "SUPABASE_DB_SIFRENIZ"
+
+[auth]
+mobil_password = "GUVENLI_MOBIL_SIFRE"
+servis_password = "GUVENLI_SERVIS_SIFRE"
+admin_password = "GUVENLI_ADMIN_SIFRE"
+
+# yeni.py AI sekmesi için (isteğe bağlı, üst seviye anahtar)
+# GEMINI_API_KEY = "AIza..."
