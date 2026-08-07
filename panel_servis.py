@@ -11,7 +11,8 @@ from datetime import datetime, date
 from panel_db import (
     load_panel_data, job_musteri_telefon, job_musteri_konum, render_action_link,
     min_visible_date, group_jobs_by_visit, summarize_personnel, format_personnel_html,
-    visit_group_label, subscription_label,
+    visit_group_label, subscription_labels_merged,
+    sort_visit_groups, visit_has_pro,
 )
 from panel_auth import require_auth
 
@@ -63,6 +64,14 @@ st.markdown("""
         background: #1565c0; color: #fff; padding: 12px 16px;
         border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 14px;
     }
+    .list-tier-sep {
+        display: flex; align-items: center; margin: 18px 0 14px 0;
+        color: var(--text-color, #666); font-size: 13px; font-weight: 700;
+    }
+    .list-tier-sep::before, .list-tier-sep::after {
+        content: ""; flex: 1; border-bottom: 2px dashed rgba(128, 128, 128, 0.4);
+    }
+    .list-tier-sep span { padding: 0 14px; white-space: nowrap; }
     @media (max-width: 640px) {
         .block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
     }
@@ -150,14 +159,22 @@ sel = st.session_state.servis_date
 st.markdown(f'<div class="day-header">📅 {sel}</div>', unsafe_allow_html=True)
 
 day_jobs = [j for j in jobs if j.get("date") == sel]
-visit_groups = group_jobs_by_visit(day_jobs)
-visit_groups.sort(key=lambda g: (visit_group_label(g).get("name") or "", visit_group_label(g).get("group_id") or ""))
+visit_groups = sort_visit_groups(group_jobs_by_visit(day_jobs))
 
 if not visit_groups:
     st.info("Bu gün için planlanmış iş yok.")
 else:
     st.caption(f"{len(visit_groups)} ziyaret · {len(day_jobs)} personel")
+    prev_tier = None
     for idx, group in enumerate(visit_groups):
+        tier = 0 if visit_has_pro(group) else 1
+        if prev_tier == 0 and tier == 1:
+            st.markdown(
+                '<div class="list-tier-sep"><span>🎓 Öğrenci personelli işler</span></div>',
+                unsafe_allow_html=True,
+            )
+        prev_tier = tier
+
         j = visit_group_label(group)
         musteri = j.get("name") or "Müşteri"
         counts, ucret, names, phones = summarize_personnel(group)
@@ -165,7 +182,7 @@ else:
         contact = job_musteri_telefon(j)
         loc = maps_link(job_musteri_konum(j))
         tag = "🔄" if j.get("job_tag") == "subscription" else "🔹"
-        sub = subscription_label(j, sub_meta)
+        sub = subscription_labels_merged(group, sub_meta)
         meta_lines = [
             f"👷 {personel_line}",
             f"📞 Müşteri: <b>{contact or '—'}</b>",

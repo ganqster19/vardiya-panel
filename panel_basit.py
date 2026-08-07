@@ -16,7 +16,8 @@ from panel_db import (
     job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date,
     group_jobs_by_visit, summarize_personnel, format_personnel_badge, format_personnel_html,
     personel_listesi_ozet, expand_personnel_by_type, build_visit_db_rows, visit_group_label,
-    visit_delete_action, subscription_label,
+    visit_delete_action, subscription_label, subscription_labels_merged,
+    sort_visit_groups, visit_has_pro,
 )
 from panel_auth import require_auth
 
@@ -179,6 +180,14 @@ st.markdown("""
     .nav-day-btn div.stButton > button {
         min-height: 56px; font-size: 17px; font-weight: 700;
     }
+    .list-tier-sep {
+        display: flex; align-items: center; margin: 18px 0 14px 0;
+        color: var(--text-color, #666); font-size: 13px; font-weight: 700;
+    }
+    .list-tier-sep::before, .list-tier-sep::after {
+        content: ""; flex: 1; border-bottom: 2px dashed rgba(128, 128, 128, 0.4);
+    }
+    .list-tier-sep span { padding: 0 14px; white-space: nowrap; }
     @media (max-width: 640px) {
         .block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
         h1 { font-size: 1.35rem !important; }
@@ -269,9 +278,17 @@ def maps_link(url):
     return u
 
 
-def render_visit_card(group, sub_label=""):
+def render_tier_separator():
+    st.markdown(
+        '<div class="list-tier-sep"><span>🎓 Öğrenci personelli işler</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_visit_card(group, sub_meta=None):
     j = visit_group_label(group)
     musteri = j.get("name") or "Müşteri"
+    sub_label = subscription_labels_merged(group, sub_meta) if sub_meta is not None else ""
     counts, ucret, names, phones = summarize_personnel(group)
     personel_line = format_personnel_html(counts, ucret, names, phones)
     contact = job_musteri_telefon(j)
@@ -300,6 +317,7 @@ def render_visit_edit_form(group, i, customers):
     jid = gid or j.get("id", i)
     counts, ucret, names, phones = summarize_personnel(group)
     existing = {"pro": names["pro"], "student": names["student"], "phones": phones}
+    session_gids = {(r.get("group_id") or "").strip() for r in group if (r.get("group_id") or "").strip()}
 
     if not customers:
         st.caption("Müşteri listesi boş — önce 👤 Müşteri sekmesinden ekleyin.")
@@ -313,6 +331,9 @@ def render_visit_edit_form(group, i, customers):
     cur_tag_i = 1 if j.get("job_tag") == "subscription" else 0
 
     with st.expander("✏️ İşi düzenle"):
+        if len(session_gids) > 1:
+            st.info("Bu kartta birden fazla abonelik kotası birleşik. Düzenleme için admin panelini kullanın.")
+            return
         st.caption("Telefon ve konum müşteri profilinden gelir → **👤 Müşteri** sekmesi.")
 
         em = st.selectbox("Müşteri", names_list, index=cust_idx, key=f"ed_cust_{jid}_{i}")
@@ -601,8 +622,8 @@ with tab_takvim:
     ms = f"{sm:02d}.{sy}"
     month_jobs = [j for j in jobs_list if j.get("date") and ms in j["date"]]
 
-    def get_sub_label(job):
-        return subscription_label(job, sub_meta)
+    def get_sub_label(group):
+        return subscription_labels_merged(group, sub_meta)
 
     day_map = {}
     for group in group_jobs_by_visit(month_jobs):
@@ -610,7 +631,7 @@ with tab_takvim:
         d = j["date"]
         day_map.setdefault(d, {"jobs": {}, "kisi": 0})
         day_map[d]["kisi"] += len(group)
-        label = f"{j['name']}{get_sub_label(j)}"
+        label = f"{j['name']}{get_sub_label(group)}"
         day_map[d]["jobs"].setdefault(label, {"tag": j.get("job_tag", "one_time"), "kisi": 0})
         day_map[d]["jobs"][label]["kisi"] += len(group)
 
@@ -649,18 +670,22 @@ with tab_takvim:
     st.markdown(f'<div class="day-header">📅 {sd}</div>', unsafe_allow_html=True)
 
     djs = [j for j in jobs_list if j.get("date") == sd]
-    visit_groups = group_jobs_by_visit(djs)
-    visit_groups.sort(key=lambda g: (visit_group_label(g).get("name") or "", visit_group_label(g).get("group_id") or ""))
+    visit_groups = sort_visit_groups(group_jobs_by_visit(djs))
 
     if not visit_groups:
         st.info("Bu gün için planlanmış iş yok.")
     else:
         st.caption(f"{len(visit_groups)} ziyaret · {len(djs)} personel")
+        prev_tier = None
         for i, group in enumerate(visit_groups):
+            tier = 0 if visit_has_pro(group) else 1
+            if prev_tier == 0 and tier == 1:
+                render_tier_separator()
+            prev_tier = tier
+
             j = visit_group_label(group)
             jid = j.get("group_id") or j.get("id", i)
-            sub = get_sub_label(j)
-            render_visit_card(group, sub)
+            render_visit_card(group, sub_meta)
 
             act1, act2, act3 = st.columns(3)
             contact = job_musteri_telefon(j)
