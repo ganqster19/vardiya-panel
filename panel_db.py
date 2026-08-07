@@ -43,8 +43,51 @@ TIP_LABELS = {"pro": "Profesyonel", "student": "Öğrenci"}
 
 
 def job_visit_key(job):
-    """Aynı ziyarete ait satırları grupla (tarih + group_id)."""
-    return (job.get("date") or "", job.get("group_id") or str(job.get("id")))
+    """Aynı ziyarete ait satırları grupla.
+
+    - Abonelik: group_id (aynı kota oturumu)
+    - Tek seferlik: aynı müşteri + aynı gün → tek kart (farklı group_id olsa bile)
+    """
+    date = job.get("date") or ""
+    gid = (job.get("group_id") or "").strip()
+    cid = job.get("customer_id")
+    tag = job.get("job_tag") or "one_time"
+
+    if tag == "subscription":
+        if gid:
+            return (date, "sub", gid)
+        if cid is not None:
+            return (date, "sub", f"c{cid}")
+        return (date, "sub", str(job.get("id")))
+
+    if cid is not None and date:
+        return (date, "once", str(cid))
+    if gid:
+        return (date, "once", gid)
+    return (date, "once", str(job.get("id")))
+
+
+def visit_delete_action(group):
+    """Ziyaret grubunun tamamını silmek için SQL."""
+    j = visit_group_label(group)
+    tag = j.get("job_tag") or "one_time"
+    gid = (j.get("group_id") or "").strip()
+    date = j.get("date") or ""
+    cid = j.get("customer_id")
+
+    if tag == "subscription" and gid:
+        return ("DELETE FROM jobs WHERE group_id=%s", (gid,))
+    if tag == "one_time" and date and cid is not None:
+        return (
+            "DELETE FROM jobs WHERE customer_id=%s AND COALESCE(date, '')=%s AND job_tag=%s",
+            (cid, date, "one_time"),
+        )
+    if gid:
+        return (
+            "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
+            (gid, date),
+        )
+    return None
 
 
 def group_jobs_by_visit(jobs):

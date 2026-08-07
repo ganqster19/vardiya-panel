@@ -16,6 +16,7 @@ from panel_db import (
     job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date,
     group_jobs_by_visit, summarize_personnel, format_personnel_badge, format_personnel_html,
     personel_listesi_ozet, expand_personnel_by_type, build_visit_db_rows, visit_group_label,
+    visit_delete_action,
 )
 from panel_auth import require_auth
 
@@ -359,14 +360,16 @@ def render_visit_edit_form(group, i, customers):
                 personeller = expand_personnel_by_type(
                     e_pro_n, e_pro_u, e_stu_n, e_stu_u, existing,
                 )
+                new_gid = gid or str(uuid.uuid4())[:8]
                 new_rows = build_visit_db_rows(
-                    gid, new_ds, new_cid, new_tag, float(epc), personeller,
+                    new_gid, new_ds, new_cid, new_tag, float(epc), personeller,
                 )
-                add_to_queue(
-                    f"İş güncelle: {em}",
-                    "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
-                    (gid, old_date),
-                )
+                del_action = visit_delete_action(group)
+                if del_action:
+                    add_to_queue(f"İş güncelle: {em}", del_action[0], del_action[1])
+                else:
+                    for r in group:
+                        add_to_queue("Silme", "DELETE FROM jobs WHERE id=%s", (r["id"],))
                 add_to_queue(
                     f"İş yeniden oluştur: {em}",
                     JOB_INSERT_SQL,
@@ -685,16 +688,9 @@ with tab_takvim:
                 render_action_link("🗺️ Harita", loc, new_tab=True)
             with act3:
                 if st.button("🗑️", key=f"basit_del_{jid}_{i}", use_container_width=True, help="Sil"):
-                    gid = j.get("group_id")
-                    old_date = j.get("date") or ""
-                    if gid and j.get("job_tag") == "subscription":
-                        add_to_queue("Silme", "DELETE FROM jobs WHERE group_id=%s", (gid,))
-                    elif gid:
-                        add_to_queue(
-                            "Silme",
-                            "DELETE FROM jobs WHERE group_id=%s AND COALESCE(date, '')=%s",
-                            (gid, old_date),
-                        )
+                    del_action = visit_delete_action(group)
+                    if del_action:
+                        add_to_queue("Silme", del_action[0], del_action[1])
                     else:
                         for r in group:
                             add_to_queue("Silme", "DELETE FROM jobs WHERE id=%s", (r["id"],))
@@ -738,23 +734,29 @@ with tab_takvim:
         for uj in unscheduled:
             pid = uj["group_id"].split("_")[0]
             if pid not in pkgs:
-                pkgs[pid] = {"name": uj["name"], "sessions": set(), "total": len(pkg_totals.get(pid, []))}
-            pkgs[pid]["sessions"].add(uj["group_id"])
+                pkgs[pid] = {"name": uj["name"], "sessions": {}, "total": len(pkg_totals.get(pid, []))}
+            gid = uj.get("group_id")
+            pkgs[pid]["sessions"].setdefault(gid, []).append(uj)
 
         if not pkgs:
             st.caption("Bekleyen kota yok.")
         else:
             for pid, pdata in pkgs.items():
+                pending = len(pdata["sessions"])
                 st.markdown(
                     f"<div class='quota-box'><b>{pdata['name']}</b><br>"
-                    f"Kalan: {len(pdata['sessions'])}/{pdata['total']}</div>",
+                    f"Kalan: {pending}/{pdata['total']}</div>",
                     unsafe_allow_html=True,
                 )
+                for gid, rows in sorted(pdata["sessions"].items(), key=lambda x: x[0]):
+                    counts, ucret, names, phones = summarize_personnel(rows)
+                    badge = format_personnel_badge(counts, ucret)
+                    st.caption(f"👷 {badge}")
                 if st.button(f"📌 {sd} gününe ata", key=f"basit_ass_{pid}", use_container_width=True):
                     def _kota_sira(gid):
                         parca = gid.split("_")
                         return int(parca[1]) if len(parca) > 1 and parca[1].isdigit() else 0
-                    sess = sorted(pdata["sessions"], key=_kota_sira)[0]
+                    sess = sorted(pdata["sessions"].keys(), key=_kota_sira)[0]
                     add_to_queue("Tarih atama", "UPDATE jobs SET date=%s WHERE group_id=%s", (sd, sess))
                     for job_mem in jobs_list:
                         if job_mem.get("group_id") == sess:
