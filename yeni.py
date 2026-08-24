@@ -13,8 +13,10 @@ from panel_db import (
     group_jobs_by_visit, visit_group_label, summarize_personnel,
     format_personnel_badge, personel_listesi_ozet, expand_personnel_by_type,
     build_visit_db_rows, JOB_INSERT_SQL, build_subscription_calendar_meta,
-    subscription_labels_merged, sort_visit_groups, visit_has_pro,
-    visit_delete_action,
+    subscription_labels_merged, subscription_label, sort_visit_groups, visit_has_pro,
+    visit_delete_action, split_group_by_session, visit_customer_revenue,
+    hesapla_abonelik_yukumluluk, ay_ziyaret_cirosu,
+    build_visit_summaries, aggregate_visit_summaries, customer_ranking_from_summaries,
 )
 
 # --- SAYFA AYARLARI ---
@@ -241,7 +243,7 @@ def hesapla_ay_ozet(db, jobs_list, trans_list, sal_list, sm, sy):
     exp_trans = sum(float(t['amount'] or 0) for t in trans_list if t.get('date') and t.get('type') == 'expense' and arama in t['date'])
     exp_sal = sum(float(s['amount'] or 0) for s in sal_list if s.get('month_year') and sal_arama in s['month_year'])
     exp_daily = hesapla_gunluk_giderler(db, sm, sy)
-    inc_jobs = sum(float(j['price_customer'] or 0) for j in jobs_list if j.get('date') and arama in j['date'])
+    inc_jobs = ay_ziyaret_cirosu(jobs_list, sm, sy)
     inc_trans = sum(float(t['amount'] or 0) for t in trans_list if t.get('date') and t.get('type') == 'income' and arama in t['date'])
     return {
         'inc_jobs': inc_jobs, 'inc_trans': inc_trans,
@@ -272,12 +274,12 @@ def hesapla_analiz_otomatik(db, jobs_list, trans_list, sm, sy):
     }
 
 def analiz_param_init(month_key, otomatik):
-    """Ay değişince veya ilk açılışta analiz alanlarını doldurur; kullanıcı düzenlemelerini korur."""
+    """Ay değişince analiz alanlarını doldur: varsayılan 0, yalnızca saha işçi maliyeti otomatik."""
     if st.session_state.get('analiz_aktif_ay') != month_key:
         st.session_state.analiz_aktif_ay = month_key
-        st.session_state[f"analiz_maas_{month_key}"] = otomatik['maas']
+        st.session_state[f"analiz_maas_{month_key}"] = 0.0
         st.session_state[f"analiz_saha_{month_key}"] = otomatik['saha']
-        st.session_state[f"analiz_diger_{month_key}"] = otomatik['diger_giderler']
+        st.session_state[f"analiz_diger_{month_key}"] = 0.0
 
 # --- KUYRUK FONKSİYONLARI ---
 def add_to_queue(desc, query, params, is_bulk=False):
@@ -575,7 +577,7 @@ with st.sidebar:
 st.title("🚀 Vardiya Merkezi")
 st.divider()
 
-tabs = st.tabs(["⚡ İş Ekle", "📅 Takvim", "💰 Finans", "📂 Kişiler", "📈 Analiz", "⏱️ Puantaj", "🤖 AI Asistan"])
+tabs = st.tabs(["⚡ İş Ekle", "📅 Takvim", "💰 Finans", "📂 Kişiler", "📋 İş Özetleri", "📈 Analiz", "⏱️ Puantaj", "🤖 AI Asistan"])
 
 # TAB 1: İŞ EKLE
 with tabs[0]:
@@ -737,7 +739,7 @@ with tabs[1]:
                 day_map[d]['jobs'][cust_display] = {
                     'price': 0.0, 'tag': j.get('job_tag', 'one_time'), 'kisi_sayisi': 0,
                 }
-            day_map[d]['jobs'][cust_display]['price'] += float(j.get('price_customer') or 0)
+            day_map[d]['jobs'][cust_display]['price'] += visit_customer_revenue(group)
             day_map[d]['jobs'][cust_display]['kisi_sayisi'] += len(group)
         
         cal = calendar.monthcalendar(sy, sm)
@@ -790,14 +792,26 @@ with tabs[1]:
                 session_gids = {(r.get('group_id') or '').strip() for r in group if (r.get('group_id') or '').strip()}
 
                 with st.expander(f"{tag_icon} {j['name']}{sub_label} · 👷 {badge}"):
-                    if len(session_gids) > 1:
-                        st.info("Bu kartta birden fazla abonelik kotası birleşik görünüyor.")
-                    if curr_tag == 'subscription' and gid and len(session_gids) == 1:
-                        if st.button("🔙 Tarihten Kaldır (Kotaya Geri Al)", key=f"back_{gkey}_{gi}"):
-                            add_to_queue("Kotaya Geri Al", "UPDATE jobs SET date='' WHERE group_id=%s", (gid,))
-                            for r in group:
-                                r['date'] = ''
-                            st.rerun()
+                    if curr_tag == 'subscription':
+                        st.markdown("**Kota işlemleri**")
+                        for sgi, (sg_gid, sg) in enumerate(split_group_by_session(group)):
+                            sg_rep = visit_group_label(sg)
+                            sg_lbl = subscription_label(sg_rep, sub_meta) or f" #{sgi + 1}"
+                            sg_counts, _, _, _ = summarize_personnel(sg)
+                            sg_badge = format_personnel_badge(sg_counts)
+                            c_l, c_r = st.columns([3, 1])
+                            c_l.caption(f"{sg_lbl.strip(' []') or 'Kota'} · 👷 {sg_badge}")
+                            if c_r.button("🔙 Geri al", key=f"back_{sg_gid}_{gi}_{sgi}", help="Kotayı havuza al"):
+                                add_to_queue(
+                                    "Kotaya Geri Al",
+                                    "UPDATE jobs SET date='' WHERE group_id=%s",
+                                    (sg_gid,),
+                                )
+                                for r in sg:
+                                    r['date'] = ''
+                                st.rerun()
+                        if len(session_gids) > 1:
+                            st.caption("Birden fazla kota birleşik — düzenleme için kotayı önce havuza alın veya tek kotayı seçin.")
 
                     nt = st.selectbox(
                         "Etiket", ["Tek Sefer", "Abonelik"],
@@ -1100,8 +1114,143 @@ with tabs[3]:
             else: add_to_queue("Pro Ekle", "INSERT INTO professionals (name,phone,salary) VALUES (%s,%s,%s)",(nn,pp,sal))
             st.rerun()
 
-# TAB 5: RAPOR & ANALİZ
+# TAB 5: İŞ ÖZETLERİ
 with tabs[4]:
+    st.markdown("### 📋 İş Özetleri")
+    st.caption("Geçmiş ziyaretler müşteri, dönem ve iş tipine göre filtrelenebilir.")
+
+    custs_ozet = sorted(db.get("customers", []), key=lambda c: (c.get("name") or "").casefold())
+    cust_opts = {"— Tüm müşteriler —": None}
+    cust_opts.update({c["name"]: c["id"] for c in custs_ozet if c.get("name")})
+
+    f1, f2, f3 = st.columns([2, 2, 1])
+    with f1:
+        sec_musteri = st.selectbox("Müşteri", list(cust_opts.keys()), key="ozet_musteri")
+        sec_cid = cust_opts[sec_musteri]
+    with f2:
+        donem = st.selectbox(
+            "Dönem",
+            ["Sidebar ayı", "Son 30 gün", "Son 3 ay", "Tüm geçmiş"],
+            key="ozet_donem",
+        )
+    with f3:
+        tip_filt = st.selectbox("İş tipi", ["Tümü", "Tek sefer", "Abonelik"], key="ozet_tip")
+
+    today = date.today()
+    date_from, date_to = None, None
+    if donem == "Sidebar ayı":
+        date_from = date(sy, sm, 1)
+        date_to = date(sy, sm, calendar.monthrange(sy, sm)[1])
+    elif donem == "Son 30 gün":
+        date_from = today - timedelta(days=30)
+        date_to = today
+    elif donem == "Son 3 ay":
+        date_from = today - timedelta(days=90)
+        date_to = today
+
+    tag_filt = None
+    if tip_filt == "Tek sefer":
+        tag_filt = "one_time"
+    elif tip_filt == "Abonelik":
+        tag_filt = "subscription"
+
+    sub_meta_ozet = build_subscription_calendar_meta(jobs_list)
+    pros_ozet = db.get("pros", [])
+    students_ozet = db.get("students", [])
+
+    summaries = build_visit_summaries(
+        jobs_list,
+        customer_id=sec_cid,
+        date_from=date_from,
+        date_to=date_to,
+        job_tag=tag_filt,
+        meta=sub_meta_ozet,
+        pros=pros_ozet,
+        students=students_ozet,
+    )
+    agg = aggregate_visit_summaries(summaries)
+
+    st.divider()
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Ziyaret", f"{agg['visits']} adet")
+    m2.metric("Toplam kişi-gün", f"{agg['kisi']} kişi")
+    m3.metric("Ciro", f"{agg['ciro']:,.0f} ₺")
+    m4.metric("Maliyet", f"{agg['maliyet']:,.0f} ₺")
+    m5.metric("Net kâr", f"{agg['kar']:,.0f} ₺")
+
+    if sec_cid is None and summaries:
+        st.markdown("#### 🏆 Müşteri sıralaması (net kâra göre)")
+        ranking = customer_ranking_from_summaries(summaries)[:15]
+        rank_df = pd.DataFrame([
+            {
+                "Müşteri": r["name"],
+                "Ziyaret": r["visits"],
+                "Kişi": r["kisi"],
+                "Ciro (₺)": r["ciro"],
+                "Maliyet (₺)": r["maliyet"],
+                "Net kâr (₺)": r["kar"],
+            }
+            for r in ranking
+        ])
+        st.dataframe(
+            rank_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ciro (₺)": st.column_config.NumberColumn(format="%.0f"),
+                "Maliyet (₺)": st.column_config.NumberColumn(format="%.0f"),
+                "Net kâr (₺)": st.column_config.NumberColumn(format="%.0f"),
+            },
+        )
+        st.caption("Bir müşteriyi seçerek yalnızca o müşterinin geçmiş ziyaretlerini görebilirsiniz.")
+
+    if not summaries:
+        st.info("Seçilen filtrelere uygun tamamlanmış ziyaret yok.")
+    else:
+        st.markdown("#### 📅 Ziyaret geçmişi")
+        by_month = {}
+        for s in summaries:
+            d = s["_sort_date"]
+            mk = d.strftime("%Y-%m") if d != date.min else "—"
+            by_month.setdefault(mk, []).append(s)
+
+        for mk in sorted(by_month.keys(), reverse=True):
+            month_visits = by_month[mk]
+            try:
+                y, mo = mk.split("-")
+                month_title = f"{calendar.month_name[int(mo)]} {y}"
+            except ValueError:
+                month_title = mk
+            month_kar = sum(v["kar"] for v in month_visits)
+            with st.expander(
+                f"📆 {month_title} · {len(month_visits)} ziyaret · 💹 {month_kar:,.0f} ₺",
+                expanded=(sec_cid is not None and len(by_month) <= 3),
+            ):
+                for s in month_visits:
+                    tag_ico = "🔄" if s["job_tag"] == "subscription" else "🔹"
+                    tahsil_txt = ""
+                    if s["tahsil"] is True:
+                        tahsil_txt = " · ✅ Tahsil"
+                    elif s["tahsil"] is False:
+                        tahsil_txt = " · ⏳ Alacak"
+                    kar_renk = "#2e7d32" if s["kar"] >= 0 else "#c62828"
+                    musteri_etik = f"**{s['customer']}** · " if sec_cid is None else ""
+                    st.markdown(
+                        f"{tag_ico} {musteri_etik}**{s['date']}**{s['sub_label']} · "
+                        f"{s['tag_label']}{tahsil_txt}"
+                    )
+                    det1, det2, det3 = st.columns(3)
+                    det1.markdown(f"👷 **{s['kisi']} kişi** — {s['kadro_badge']}")
+                    det2.markdown(f"🧑‍💼 **Kadro:** {s['kadro_isimleri']}")
+                    det3.markdown(
+                        f"💰 Ciro **{s['ciro']:,.0f} ₺** · Maliyet **{s['maliyet']:,.0f} ₺** · "
+                        f"<span style='color:{kar_renk};font-weight:600'>Kâr {s['kar']:,.0f} ₺</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.divider()
+
+# TAB 6: RAPOR & ANALİZ
+with tabs[5]:
     st.markdown(f"### 📈 {calendar.month_name[sm]} {sy} - Aylık Kapsamlı Analiz")
     st.caption("Parametreleri düzenleyebilirsiniz; girdiğiniz değerler ay boyunca korunur. Günlük giderler (takvimden girilen) otomatik hesaplanır.")
 
@@ -1114,11 +1263,12 @@ with tabs[4]:
     diger_key = f"analiz_diger_{month_key}"
 
     month_jobs_analysis = otomatik['month_jobs']
-    total_job_count = len(month_jobs_analysis)
-    ogrenci_is_sayisi = sum(1 for j in month_jobs_analysis if j.get('job_type') == 'student')
-    pro_is_sayisi = sum(1 for j in month_jobs_analysis if j.get('job_type') == 'pro')
+    visit_groups_analysis = group_jobs_by_visit(month_jobs_analysis)
+    total_job_count = len(visit_groups_analysis)
+    ogrenci_is_sayisi = sum(1 for g in visit_groups_analysis if not visit_has_pro(g))
+    pro_is_sayisi = total_job_count - ogrenci_is_sayisi
 
-    ciro_jobs = sum(float(j['price_customer'] or 0) for j in month_jobs_analysis)
+    ciro_jobs = sum(visit_customer_revenue(g) for g in visit_groups_analysis)
     ciro_trans = sum(float(t['amount'] or 0) for t in trans_list if t.get('date') and t.get('type') == 'income' and ay_arama(sm, sy) in t['date'])
     total_ciro = ciro_jobs + ciro_trans
 
@@ -1129,25 +1279,25 @@ with tabs[4]:
     ac1, ac2 = st.columns([3, 1])
     with ac2:
         if st.button("🔄 Otomatik Değerlere Sıfırla", key=f"analiz_reset_{month_key}", use_container_width=True):
-            st.session_state[maas_key] = otomatik['maas']
+            st.session_state[maas_key] = 0.0
             st.session_state[saha_key] = otomatik['saha']
-            st.session_state[diger_key] = otomatik['diger_giderler']
+            st.session_state[diger_key] = 0.0
             st.rerun()
 
     st.markdown("#### ⚙️ Analiz Parametreleri (düzenlenebilir)")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.caption(f"Sistem önerisi: {otomatik['maas']:,.0f} ₺")
+        st.caption("Varsayılan: 0 ₺")
         sabit_maas_input = st.number_input("👔 Maaşlı Eleman Maliyeti (₺)", min_value=0.0, step=1000.0, key=maas_key,
-            help="Profesyonellerin sabit maaşı + puantaj (✅ başına 1850 ₺). Düzenlemeniz korunur.")
+            help="Profesyonellerin sabit maaşı + puantaj. Varsayılan 0; isterseniz düzenleyin.")
     with col2:
         st.caption(f"Sistem önerisi: {otomatik['saha']:,.0f} ₺")
         saha_maliyet_input = st.number_input("👷 Saha/Günlük İşçi Maliyeti (₺)", min_value=0.0, step=500.0, key=saha_key,
-            help="Vardiyalara atanan personel ücretleri toplamı. Düzenlemeniz korunur.")
+            help="Vardiyalara atanan personel ücretleri toplamı. Ay değişince otomatik dolar.")
     with col3:
-        st.caption(f"Sistem önerisi: {otomatik['diger_giderler']:,.0f} ₺")
+        st.caption("Varsayılan: 0 ₺")
         diger_gider_input = st.number_input("🏦 Diğer Giderler (₺)", min_value=0.0, step=500.0, key=diger_key,
-            help="Transactions tablosundaki diğer masraflar (yevmiye ödemeleri vb.). Düzenlemeniz korunur.")
+            help="Diğer masraflar. Varsayılan 0; isterseniz düzenleyin.")
 
     st.markdown("#### 📋 Otomatik Giderler (sistemden, her zaman dahil)")
     og1, og2 = st.columns(2)
@@ -1165,36 +1315,48 @@ with tabs[4]:
     ort_maliyet = toplam_gider / total_job_count if total_job_count > 0 else 0
     ort_kar = toplam_kar / total_job_count if total_job_count > 0 else 0
 
-    unscheduled_subs = [j for j in jobs_list if not j.get('date') and j.get('job_tag') == 'subscription']
-    gelecek_kota_sayisi = len(unscheduled_subs)
-    gelecek_kota_maliyeti = sum(float(j['price_worker'] or 0) for j in unscheduled_subs)
-
     st.divider()
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("💰 Toplam Ciro", f"{total_ciro:,.0f} ₺")
     c2.metric("📉 Toplam Gider", f"{toplam_gider:,.0f} ₺")
     c3.metric("💹 Net Kâr", f"{toplam_kar:,.0f} ₺", f"{verimlilik:.1f}% Kâr Marjı")
-    c4.metric("📋 Tamamlanan İş", f"{total_job_count} Adet")
-    c5.metric("🎓 Öğrenci İşleri", f"{ogrenci_is_sayisi} Adet", f"👔 Pro: {pro_is_sayisi}")
+    c4.metric("📋 Tamamlanan Ziyaret", f"{total_job_count} Adet")
+    c5.metric("🎓 Öğrenci Ziyaretleri", f"{ogrenci_is_sayisi} Adet", f"👔 Pro: {pro_is_sayisi}")
 
-    st.markdown("#### 📐 Birim (İş Başına) Kârlılık Analizi")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ortalama Ciro / İş", f"{ort_ciro:,.0f} ₺")
-    c2.metric("Ortalama Maliyet / İş", f"{ort_maliyet:,.0f} ₺")
-    c3.metric("Ortalama Kâr / İş", f"{ort_kar:,.0f} ₺")
+    ay_notlari = sorted(
+        [n for n in db.get('notes', []) if n.get('date') and ay_arama(sm, sy) in n['date']],
+        key=lambda n: n.get('date', ''),
+    )
+    if ay_notlari:
+        st.markdown("#### 📝 Ay Notları (Takvimden)")
+        for n in ay_notlari:
+            st.markdown(f"- **{n.get('date', '—')}:** {n.get('note') or '—'}")
+
+    st.markdown("#### 📐 Birim (Ziyaret Başına) Kârlılık Analizi")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Ortalama Ciro / Ziyaret", f"{ort_ciro:,.0f} ₺")
+    c2.metric("Ortalama Maliyet / Ziyaret", f"{ort_maliyet:,.0f} ₺")
+    c3.metric("Ortalama Kâr / Ziyaret", f"{ort_kar:,.0f} ₺")
 
     st.divider()
 
-    st.markdown("#### ⏳ Gelecek Aya Sarkan Abonelik Yükümlülükleri (Risk/Borç)")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Kalan İş/Kota Adedi", f"{gelecek_kota_sayisi} Adet")
-    c2.metric("Tahmini Personel Gider Borcu", f"{gelecek_kota_maliyeti:,.0f} ₺")
+    borc = hesapla_abonelik_yukumluluk(jobs_list, sm, sy)
+    st.markdown(f"#### ⏳ Abonelik Yükümlülükleri — {borc['sonraki_ay']}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📅 Sonraki Ay Planlı Kota", f"{borc['sonraki_ay_kota']} Adet")
+    c2.metric("💸 Sonraki Ay Personel Maliyeti", f"{borc['sonraki_ay_maliyet']:,.0f} ₺")
+    c3.metric("📥 Havuzda Bekleyen Kota", f"{borc['havuz_kota']} Adet")
+    c4.metric("💸 Havuz Tahmini Maliyet", f"{borc['havuz_maliyet']:,.0f} ₺")
+    st.caption(
+        "Sonraki ay: seçili aydan bir sonraki takvim ayına tarihlenmiş abonelik kotaları. "
+        "Havuz: henüz tarihi atanmamış kotalar."
+    )
 
 # ==========================================
-# TAB 6: PUANTAJ VE MÜSAİTLİK YÖNETİMİ
+# TAB 7: PUANTAJ VE MÜSAİTLİK YÖNETİMİ
 # ==========================================
-with tabs[5]:
+with tabs[6]:
     _puan_start = __import__("time").perf_counter()
     t_yoklama, t_avans, t_musaıtlık = st.tabs(["📋 Yoklama Tablosu", "💸 Günlük Avans (₺)", "📅 Personel Müsaitlik Girişi"])
     
@@ -1312,8 +1474,8 @@ with tabs[5]:
     }, "C")
 
 # ==========================================
-# TAB 7: 🤖 YENİ - AI ASİSTAN (NLP İLE İŞ EKLEME/TAŞIMA/SİLME)
-with tabs[6]:
+# TAB 8: 🤖 YENİ - AI ASİSTAN (NLP İLE İŞ EKLEME/TAŞIMA/SİLME)
+with tabs[7]:
     _ai_start = __import__("time").perf_counter()
     st.markdown("### 🤖 Yapay Zeka Asistanı ile Hızlı Komutlar")
     st.info("💡 Asistana ne istediğinizi doğal bir cümleyle söyleyin. İş ekleyebilir, tarih taşıyabilir, iptal edebilir, kota ekleyip çıkarabilir, kişi sayısını değiştirebilir, gider/not girebilir ve maaş/yevmiye ödemesi kaydedebilir.\n\n*Örnekler:*\n- *'Ebru Baykanın 2 temmuzdaki kotasını 3 temmuza taşı.'*\n- *'Ahmet beye yarın 2 profesyonel gidecek, fiyat 2000.'*\n- *'Mehmetin bugünkü işini tamamen iptal et.'*\n- *'Ayşe hanımın aboneliğine 3 kota daha ekle.'*\n- *'Can'ın haftaya bekleyen 2 kotasını sil.'*\n- *'Bugün Mehmet'in işine 1 kişi daha ekle, yevmiyesi 800.'*\n- *'Yarınki işten 1 kişi eksilt.'*\n- *'Bugüne 500 TL yakıt gideri ekle.'*\n- *'Yarına not düş: müşteri anahtarı komşuda bırakacak.'*\n- *'Ali'ye 15000 TL maaş öde.'*\n- *'Veli'ye bugünkü yevmiyesi olan 900 TL'yi öde.'*")

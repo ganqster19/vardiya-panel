@@ -17,7 +17,7 @@ from panel_db import (
     group_jobs_by_visit, summarize_personnel, format_personnel_badge, format_personnel_html,
     personel_listesi_ozet, expand_personnel_by_type, build_visit_db_rows, visit_group_label,
     visit_delete_action, subscription_label, subscription_labels_merged,
-    sort_visit_groups, visit_has_pro,
+    sort_visit_groups, visit_has_pro, split_group_by_session,
 )
 from panel_auth import require_auth
 
@@ -686,6 +686,24 @@ with tab_takvim:
             j = visit_group_label(group)
             jid = j.get("group_id") or j.get("id", i)
             render_visit_card(group, sub_meta)
+
+            if j.get("job_tag") == "subscription":
+                for sgi, (sg_gid, sg) in enumerate(split_group_by_session(group)):
+                    sg_rep = visit_group_label(sg)
+                    sg_lbl = subscription_label(sg_rep, sub_meta) or f"Kota {sgi + 1}"
+                    sg_counts, _, _, _ = summarize_personnel(sg)
+                    sg_badge = format_personnel_badge(sg_counts)
+                    bc1, bc2 = st.columns([3, 1])
+                    bc1.caption(f"{sg_lbl.strip(' []')} · 👷 {sg_badge}")
+                    if bc2.button("🔙 Havuz", key=f"basit_back_{sg_gid}_{i}_{sgi}", help="Kotayı havuza al"):
+                        add_to_queue(
+                            "Kotaya Geri Al",
+                            "UPDATE jobs SET date='' WHERE group_id=%s",
+                            (sg_gid,),
+                        )
+                        for r in sg:
+                            r["date"] = ""
+                        st.rerun()
 
             act1, act2, act3 = st.columns(3)
             contact = job_musteri_telefon(j)

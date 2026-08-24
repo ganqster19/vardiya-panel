@@ -1,4 +1,5 @@
 """Mobil ve servis panelleri için ortak DB bağlantısı."""
+import calendar
 import streamlit as st
 import psycopg2
 from datetime import datetime, timedelta, date
@@ -330,6 +331,226 @@ def visit_customer_name(group) -> str:
 def sort_visit_groups(groups):
     """Önce profesyonelli işler (A-Z), sonra yalnızca öğrencili işler (A-Z)."""
     return sorted(groups, key=lambda g: (0 if visit_has_pro(g) else 1, visit_customer_name(g)))
+
+
+def split_group_by_session(group):
+    """Abonelik kartını kota (group_id) bazında alt gruplara ayır."""
+    j = visit_group_label(group)
+    if j.get("job_tag") != "subscription":
+        return [(j.get("group_id") or "visit", group)]
+    by_gid, order = {}, []
+    for r in group:
+        gid = (r.get("group_id") or "").strip()
+        if not gid:
+            continue
+        if gid not in by_gid:
+            by_gid[gid] = []
+            order.append(gid)
+        by_gid[gid].append(r)
+    if not order:
+        return [("visit", group)]
+    return [(gid, by_gid[gid]) for gid in order]
+
+
+def count_subscription_sessions(jobs):
+    """Benzersiz abonelik kota (group_id) sayısı."""
+    return len({(j.get("group_id") or "").strip() for j in jobs if (j.get("group_id") or "").strip()})
+
+
+def visit_customer_revenue(group) -> float:
+    """Ziyarette müşteriden alınan toplam (gruptaki tüm satırlar)."""
+    return sum(float(r.get("price_customer") or 0) for r in group)
+
+
+def ay_ziyaret_cirosu(jobs_list, sm: int, sy: int) -> float:
+    """Ay içindeki ziyaret gruplarından müşteri cirosu (çift sayım önlenir)."""
+    arama = f".{sm:02d}.{sy}"
+    month_jobs = [j for j in jobs_list if j.get("date") and arama in j["date"]]
+    return sum(visit_customer_revenue(g) for g in group_jobs_by_visit(month_jobs))
+
+
+def visit_worker_cost(group) -> float:
+    """Ziyarette personel maliyeti toplamı."""
+    return sum(float(r.get("price_worker") or 0) for r in group)
+
+
+def resolve_row_staff_name(row, pros_by_id=None, students_by_id=None):
+    """Satır için görüntülenecek personel adı."""
+    pros_by_id = pros_by_id or {}
+    students_by_id = students_by_id or {}
+    if row.get("assigned_pro_id") is not None:
+        p = pros_by_id.get(row["assigned_pro_id"])
+        if p:
+            return p.get("name") or "Profesyonel", "pro"
+    if row.get("assigned_student_id") is not None:
+        s = students_by_id.get(row["assigned_student_id"])
+        if s:
+            return s.get("name") or "Öğrenci", "student"
+    if row.get("staff_name"):
+        return row["staff_name"], row.get("job_type") or "pro"
+    tip = row.get("job_type") or "pro"
+    return TIP_LABELS.get(tip, tip), tip
+
+
+def format_kadro_isimleri(kadro) -> str:
+    """Kadrodaki isimleri okunabilir metne çevir."""
+    if not kadro:
+        return "—"
+    parts = []
+    for k in kadro:
+        ico = "👔" if k.get("tip") == "pro" else "🎓"
+        parts.append(f"{ico} {k.get('name', '—')}")
+    return ", ".join(parts)
+
+
+def visit_summary(group, meta=None, pros=None, students=None):
+    """Tek ziyaret için özet sözlük."""
+    j = visit_group_label(group)
+    counts, ucret, names, phones = summarize_personnel(group)
+    pros_by_id = {p["id"]: p for p in (pros or [])}
+    students_by_id = {s["id"]: s for s in (students or [])}
+
+    kadro = []
+    for r in group:
+        nm, tip = resolve_row_staff_name(r, pros_by_id, students_by_id)
+        kadro.append({
+            "name": nm,
+            "tip": tip,
+            "ucret": float(r.get("price_worker") or 0),
+        })
+
+    revenue = visit_customer_revenue(group)
+    cost = visit_worker_cost(group)
+    tag = j.get("job_tag") or "one_time"
+    has_charge = any(float(r.get("price_customer") or 0) > 0 for r in group)
+    if has_charge:
+        tahsil = all(
+            bool(r.get("is_collected"))
+            for r in group
+            if float(r.get("price_customer") or 0) > 0
+        )
+    else:
+        tahsil = None
+
+    return {
+        "date": j.get("date") or "",
+        "customer": j.get("name") or "—",
+        "customer_id": j.get("customer_id"),
+        "job_tag": tag,
+        "tag_label": "Abonelik" if tag == "subscription" else "Tek sefer",
+        "sub_label": subscription_labels_merged(group, meta) if tag == "subscription" else "",
+        "kisi": len(group),
+        "counts": counts,
+        "kadro_badge": format_personnel_badge(counts, ucret),
+        "kadro_isimleri": format_kadro_isimleri(kadro),
+        "kadro": kadro,
+        "ciro": revenue,
+        "maliyet": cost,
+        "kar": revenue - cost,
+        "tahsil": tahsil,
+        "has_pro": visit_has_pro(group),
+        "_sort_date": parse_tr_date_str(j.get("date")) or date.min,
+    }
+
+
+def build_visit_summaries(
+    jobs_list,
+    customer_id=None,
+    date_from=None,
+    date_to=None,
+    job_tag=None,
+    meta=None,
+    pros=None,
+    students=None,
+):
+    """Filtrelenmiş ziyaret özetleri (yeniden eskiye)."""
+    dated = [j for j in jobs_list if (j.get("date") or "").strip()]
+    if customer_id is not None:
+        dated = [j for j in dated if j.get("customer_id") == customer_id]
+
+    summaries = []
+    for group in group_jobs_by_visit(dated):
+        s = visit_summary(group, meta, pros, students)
+        d = s["_sort_date"]
+        if date_from and d < date_from:
+            continue
+        if date_to and d > date_to:
+            continue
+        if job_tag and s["job_tag"] != job_tag:
+            continue
+        summaries.append(s)
+
+    summaries.sort(key=lambda x: (x["_sort_date"], x["customer"]), reverse=True)
+    return summaries
+
+
+def aggregate_visit_summaries(summaries):
+    """Özet listesinden toplam metrikler."""
+    if not summaries:
+        return {"visits": 0, "ciro": 0.0, "maliyet": 0.0, "kar": 0.0, "kisi": 0}
+    return {
+        "visits": len(summaries),
+        "ciro": sum(s["ciro"] for s in summaries),
+        "maliyet": sum(s["maliyet"] for s in summaries),
+        "kar": sum(s["kar"] for s in summaries),
+        "kisi": sum(s["kisi"] for s in summaries),
+    }
+
+
+def customer_ranking_from_summaries(summaries):
+    """Müşteri bazında ziyaret/kâr sıralaması."""
+    by_cust = {}
+    for s in summaries:
+        key = s.get("customer_id") if s.get("customer_id") is not None else s["customer"]
+        if key not in by_cust:
+            by_cust[key] = {
+                "customer_id": s.get("customer_id"),
+                "name": s["customer"],
+                "visits": 0,
+                "ciro": 0.0,
+                "maliyet": 0.0,
+                "kar": 0.0,
+                "kisi": 0,
+            }
+        row = by_cust[key]
+        row["visits"] += 1
+        row["ciro"] += s["ciro"]
+        row["maliyet"] += s["maliyet"]
+        row["kar"] += s["kar"]
+        row["kisi"] += s["kisi"]
+    return sorted(by_cust.values(), key=lambda x: (-x["kar"], -x["visits"], x["name"]))
+
+
+def sonraki_ay(sm: int, sy: int):
+    if sm >= 12:
+        return 1, sy + 1
+    return sm + 1, sy
+
+
+def hesapla_abonelik_yukumluluk(jobs_list, sm: int, sy: int):
+    """Sonraki ay planlı abonelik yükü + havuzdaki bekleyen kotalar."""
+    nsm, nsy = sonraki_ay(sm, sy)
+    next_arama = f".{nsm:02d}.{nsy}"
+
+    next_jobs = [
+        j for j in jobs_list
+        if j.get("job_tag") == "subscription" and j.get("date") and next_arama in j["date"]
+    ]
+    unscheduled = [
+        j for j in jobs_list
+        if j.get("job_tag") == "subscription" and not (j.get("date") or "").strip()
+    ]
+
+    next_gids = {(j.get("group_id") or "").strip() for j in next_jobs if j.get("group_id")}
+    pool_gids = {(j.get("group_id") or "").strip() for j in unscheduled if j.get("group_id")}
+
+    return {
+        "sonraki_ay": f"{calendar.month_name[nsm]} {nsy}",
+        "sonraki_ay_kota": len(next_gids),
+        "sonraki_ay_maliyet": sum(float(j.get("price_worker") or 0) for j in next_jobs),
+        "havuz_kota": len(pool_gids),
+        "havuz_maliyet": sum(float(j.get("price_worker") or 0) for j in unscheduled),
+    }
 
 
 def min_visible_date() -> date:
